@@ -56,6 +56,10 @@ def get_status():
     return {**_status, "ws_ready": _ws_ready.is_set(), "subscribed_codes": list(_subscribed_codes)}
 
 
+_http_session = requests.Session()
+_http_session.trust_env = False  # 환경변수의 프록시 설정을 무시 (설정된 프록시가 응답 없으면 무한 대기하는 문제 방지)
+
+
 def _get_approval_key():
     """웹소켓 접속키(approval_key) 발급"""
     url = f"{REST_BASE}/oauth2/Approval"
@@ -64,7 +68,7 @@ def _get_approval_key():
         "appkey": APP_KEY,
         "secretkey": APP_SECRET,
     }
-    resp = requests.post(url, json=body, timeout=10)
+    resp = _http_session.post(url, json=body, timeout=10)
     if resp.status_code != 200:
         print(f"[KIS WS] approval 요청 실패 {resp.status_code}: {resp.text[:300]}", flush=True)
     resp.raise_for_status()

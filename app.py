@@ -59,6 +59,7 @@ def quotes():
 @app.route("/api/net-test")
 def net_test():
     """Shell 없이도 서버에서 직접 아웃바운드 네트워크 상태를 진단"""
+    import os as _os
     import socket
     import time as _time
 
@@ -66,10 +67,20 @@ def net_test():
 
     results = {}
 
+    # 0) 프록시 관련 환경변수가 설정되어 있는지 확인 (있으면 requests가 자동으로 그쪽을 타려다 멈출 수 있음)
+    results["proxy_env"] = {
+        k: _os.environ.get(k) for k in
+        ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "NO_PROXY", "no_proxy")
+        if _os.environ.get(k)
+    }
+
+    session = _requests.Session()
+    session.trust_env = False  # 환경변수의 프록시 설정을 무시하도록 강제
+
     # 1) REST API 포트(HTTPS, 9443) - DNS + TCP + TLS까지
     t0 = _time.time()
     try:
-        r = _requests.get("https://openapi.koreainvestment.com:9443/", timeout=8)
+        r = session.get("https://openapi.koreainvestment.com:9443/", timeout=8)
         results["https_9443"] = {"ok": True, "status": r.status_code, "elapsed_sec": round(_time.time() - t0, 2)}
     except Exception as e:
         results["https_9443"] = {"ok": False, "error": f"{type(e).__name__}: {e}", "elapsed_sec": round(_time.time() - t0, 2)}
@@ -100,7 +111,7 @@ def net_test():
             "appkey": kis_client.APP_KEY,
             "secretkey": kis_client.APP_SECRET,
         }
-        r = _requests.post(f"{kis_client.REST_BASE}/oauth2/Approval", json=body, timeout=8)
+        r = session.post(f"{kis_client.REST_BASE}/oauth2/Approval", json=body, timeout=8)
         ok = r.status_code == 200 and "approval_key" in r.json()
         results["oauth_approval"] = {
             "ok": ok, "status": r.status_code,
