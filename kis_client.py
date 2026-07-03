@@ -37,6 +37,24 @@ _pending_queue = queue.Queue()
 _ws_ready = threading.Event()
 _approval_key = None
 
+# 진단용 상태 - /api/kis-status 에서 그대로 노출
+_status = {
+    "phase": "not_started",       # not_started -> requesting_approval -> connected -> looping -> error
+    "last_error": None,
+    "last_error_at": None,
+    "connected_at": None,
+    "loop_count": 0,              # recv 루프가 몇 번 돌았는지 (스레드 생존 확인용)
+    "last_loop_at": None,
+}
+
+
+def _now():
+    return time.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def get_status():
+    return {**_status, "ws_ready": _ws_ready.is_set(), "subscribed_codes": list(_subscribed_codes)}
+
 
 def _get_approval_key():
     """웹소켓 접속키(approval_key) 발급"""
@@ -124,10 +142,12 @@ def _run_forever():
 
     while True:
         try:
+            _status["phase"] = "requesting_approval"
             print("[KIS WS] approval_key 요청 중...", flush=True)
             _approval_key = _get_approval_key()
             print(f"[KIS WS] approval_key 발급 성공: {_approval_key[:8]}...", flush=True)
 
+            _status["phase"] = "connecting"
             ws = websocket.WebSocket()
             ws.settimeout(10)  # 연결 자체가 막혀있을 때 무한 대기 방지
             ws.connect(WS_URL, ping_interval=60)
@@ -135,8 +155,12 @@ def _run_forever():
             ws.settimeout(1.0)
             _subscribed_codes.clear()
             _ws_ready.set()
+            _status["phase"] = "looping"
+            _status["connected_at"] = _now()
 
             while True:
+                _status["loop_count"] += 1
+                _status["last_loop_at"] = _now()
                 # 큐에 쌓인 신규 구독 요청 처리
                 while not _pending_queue.empty():
                     code = _pending_queue.get()
@@ -180,14 +204,19 @@ def _run_forever():
 
         except Exception as e:
             import traceback
+            tb = traceback.format_exc()
             print(f"[KIS WS] 연결 오류, 5초 후 재시도: {e}", flush=True)
-            print(traceback.format_exc(), flush=True)
+            print(tb, flush=True)
+            _status["phase"] = "error"
+            _status["last_error"] = f"{type(e).__name__}: {e}"
+            _status["last_error_at"] = _now()
             _ws_ready.clear()
             time.sleep(5)
 
 
 def start_background():
     if not APP_KEY or not APP_SECRET:
+        _status["phase"] = "disabled_no_key"
         print("[KIS WS] KIS_APP_KEY / KIS_APP_SECRET 환경변수가 설정되지 않았습니다. "
               "실시간 시세가 동작하지 않습니다.", flush=True)
         return

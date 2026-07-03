@@ -58,12 +58,8 @@ def quotes():
 
 @app.route("/api/kis-status")
 def kis_status():
-    """진단용: 웹소켓 연결/구독 상태와 캐시 원본을 그대로 보여줌"""
-    return jsonify({
-        "ws_ready": kis_client._ws_ready.is_set(),
-        "subscribed_codes": list(kis_client._subscribed_codes),
-        "cache": kis_client.QUOTE_CACHE,
-    })
+    """진단용: 웹소켓 연결 단계, 마지막 에러, 캐시 원본을 그대로 보여줌"""
+    return jsonify({**kis_client.get_status(), "cache": kis_client.QUOTE_CACHE})
 
 
 @app.route("/manifest.json")
