@@ -47,6 +47,8 @@ def _get_approval_key():
         "secretkey": APP_SECRET,
     }
     resp = requests.post(url, json=body, timeout=10)
+    if resp.status_code != 200:
+        print(f"[KIS WS] approval 요청 실패 {resp.status_code}: {resp.text[:300]}", flush=True)
     resp.raise_for_status()
     return resp.json()["approval_key"]
 
@@ -118,11 +120,16 @@ def get_quote(code):
 def _run_forever():
     global _approval_key
 
+    print("[KIS WS] 백그라운드 스레드 시작", flush=True)
+
     while True:
         try:
+            print("[KIS WS] approval_key 요청 중...", flush=True)
             _approval_key = _get_approval_key()
             print(f"[KIS WS] approval_key 발급 성공: {_approval_key[:8]}...", flush=True)
+
             ws = websocket.WebSocket()
+            ws.settimeout(10)  # 연결 자체가 막혀있을 때 무한 대기 방지
             ws.connect(WS_URL, ping_interval=60)
             print(f"[KIS WS] 웹소켓 연결 성공: {WS_URL}", flush=True)
             ws.settimeout(1.0)
@@ -172,7 +179,9 @@ def _run_forever():
                         pass
 
         except Exception as e:
+            import traceback
             print(f"[KIS WS] 연결 오류, 5초 후 재시도: {e}", flush=True)
+            print(traceback.format_exc(), flush=True)
             _ws_ready.clear()
             time.sleep(5)
 
@@ -182,5 +191,6 @@ def start_background():
         print("[KIS WS] KIS_APP_KEY / KIS_APP_SECRET 환경변수가 설정되지 않았습니다. "
               "실시간 시세가 동작하지 않습니다.", flush=True)
         return
+    print(f"[KIS WS] APP_KEY 확인됨 ({APP_KEY[:4]}...), 백그라운드 스레드 생성", flush=True)
     t = threading.Thread(target=_run_forever, daemon=True)
     t.start()
