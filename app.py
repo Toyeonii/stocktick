@@ -56,6 +56,44 @@ def quotes():
     return jsonify(out)
 
 
+@app.route("/api/net-test")
+def net_test():
+    """Shell 없이도 서버에서 직접 아웃바운드 네트워크 상태를 진단"""
+    import socket
+    import time as _time
+
+    import requests as _requests
+
+    results = {}
+
+    # 1) REST API 포트(HTTPS, 9443) - DNS + TCP + TLS까지
+    t0 = _time.time()
+    try:
+        r = _requests.get("https://openapi.koreainvestment.com:9443/", timeout=8)
+        results["https_9443"] = {"ok": True, "status": r.status_code, "elapsed_sec": round(_time.time() - t0, 2)}
+    except Exception as e:
+        results["https_9443"] = {"ok": False, "error": f"{type(e).__name__}: {e}", "elapsed_sec": round(_time.time() - t0, 2)}
+
+    # 2) 웹소켓 포트(21000) - 순수 TCP 연결만 테스트 (프로토콜 핸드셰이크 전)
+    t0 = _time.time()
+    try:
+        s = socket.create_connection(("ops.koreainvestment.com", 21000), timeout=8)
+        s.close()
+        results["tcp_21000"] = {"ok": True, "elapsed_sec": round(_time.time() - t0, 2)}
+    except Exception as e:
+        results["tcp_21000"] = {"ok": False, "error": f"{type(e).__name__}: {e}", "elapsed_sec": round(_time.time() - t0, 2)}
+
+    # 3) DNS 조회 자체가 되는지 (앞의 둘이 다 실패하면 이걸로 원인 좁히기)
+    t0 = _time.time()
+    try:
+        ip = socket.gethostbyname("ops.koreainvestment.com")
+        results["dns"] = {"ok": True, "resolved_ip": ip, "elapsed_sec": round(_time.time() - t0, 2)}
+    except Exception as e:
+        results["dns"] = {"ok": False, "error": f"{type(e).__name__}: {e}", "elapsed_sec": round(_time.time() - t0, 2)}
+
+    return jsonify(results)
+
+
 @app.route("/api/kis-status")
 def kis_status():
     """진단용: 웹소켓 연결 단계, 마지막 에러, 캐시 원본을 그대로 보여줌"""
