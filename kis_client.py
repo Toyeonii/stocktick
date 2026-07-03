@@ -1,0 +1,183 @@
+"""
+한국투자증권(KIS) 실시간 체결가 웹소켓 클라이언트.
+
+- 서버 시작 시 백그라운드 스레드로 웹소켓 세션을 하나 열어두고 계속 유지.
+- 프론트에서 관심종목이 추가되면 ensure_subscribed(code)를 호출해 구독 등록.
+- 들어오는 체결가는 QUOTE_CACHE(dict)에 저장, /api/quotes 는 이 캐시를 그대로 읽음.
+
+실전투자 기준 세션 당 구독 가능 종목 수는 최대 40개 내외로 제한되어 있음(정책 변동 가능).
+"""
+
+import json
+import os
+import queue
+import threading
+import time
+
+import requests
+import websocket
+
+APP_KEY = os.environ.get("KIS_APP_KEY", "")
+APP_SECRET = os.environ.get("KIS_APP_SECRET", "")
+IS_VIRTUAL = os.environ.get("KIS_VIRTUAL", "0") == "1"  # 모의투자 계좌면 1
+
+REST_BASE = "https://openapivts.koreainvestment.com:29443" if IS_VIRTUAL \
+    else "https://openapi.koreainvestment.com:9443"
+WS_URL = "ws://ops.koreainvestment.com:31000" if IS_VIRTUAL \
+    else "ws://ops.koreainvestment.com:21000"
+
+MAX_SUBSCRIPTIONS = 38  # 안전 마진 (정책상 40 내외)
+
+# 종목코드 -> 최신 시세 dict
+QUOTE_CACHE = {}
+_cache_lock = threading.Lock()
+
+_subscribed_codes = set()
+_pending_queue = queue.Queue()
+_ws_ready = threading.Event()
+_approval_key = None
+
+
+def _get_approval_key():
+    """웹소켓 접속키(approval_key) 발급"""
+    url = f"{REST_BASE}/oauth2/Approval"
+    body = {
+        "grant_type": "client_credentials",
+        "appkey": APP_KEY,
+        "secretkey": APP_SECRET,
+    }
+    resp = requests.post(url, json=body, timeout=10)
+    resp.raise_for_status()
+    return resp.json()["approval_key"]
+
+
+def _subscribe_frame(approval_key, code, tr_type="1"):
+    return json.dumps({
+        "header": {
+            "approval_key": approval_key,
+            "custtype": "P",
+            "tr_type": tr_type,  # 1=등록, 2=해지
+            "content-type": "utf-8",
+        },
+        "body": {
+            "input": {
+                "tr_id": "H0STCNT0",  # 실시간 국내주식 체결가
+                "tr_key": code,
+            }
+        },
+    })
+
+
+def _parse_tick(raw_fields):
+    """H0STCNT0 필드 배열 -> 우리 앱에서 쓰는 dict"""
+    # 0:종목코드 1:체결시간 2:현재가 3:전일대비부호 4:전일대비 5:전일대비율
+    # 6:가중평균가 7:시가 8:고가 9:저가 10:매도호가1 11:매수호가1
+    # 12:체결거래량 13:누적거래량 14:누적거래대금 ...
+    code = raw_fields[0]
+    sign = raw_fields[3]  # 1상한 2상승 3보합 4하한 5하락
+    mult = -1 if sign in ("4", "5") else 1
+    try:
+        price = float(raw_fields[2])
+        change = float(raw_fields[4]) * mult
+        rate = float(raw_fields[5]) * mult
+        open_ = float(raw_fields[7])
+        high = float(raw_fields[8])
+        low = float(raw_fields[9])
+        volume = float(raw_fields[13])
+    except (ValueError, IndexError):
+        return None
+
+    return {
+        "code": code,
+        "price": price,
+        "change": change,
+        "rate": rate,
+        "open": open_,
+        "high": high,
+        "low": low,
+        "volume": volume,
+        "sign": sign,
+        "ts": raw_fields[1],
+    }
+
+
+def ensure_subscribed(code):
+    """아직 구독 안 한 종목코드면 구독 큐에 넣음 (백그라운드 스레드가 실제 전송)"""
+    if code in _subscribed_codes:
+        return
+    if len(_subscribed_codes) >= MAX_SUBSCRIPTIONS:
+        return  # 정책 한도 초과 시 조용히 무시 (필요하면 여기서 에러 표시 가능)
+    _pending_queue.put(code)
+
+
+def get_quote(code):
+    with _cache_lock:
+        return QUOTE_CACHE.get(code)
+
+
+def _run_forever():
+    global _approval_key
+
+    while True:
+        try:
+            _approval_key = _get_approval_key()
+            ws = websocket.WebSocket()
+            ws.connect(WS_URL, ping_interval=60)
+            ws.settimeout(1.0)
+            _subscribed_codes.clear()
+            _ws_ready.set()
+
+            while True:
+                # 큐에 쌓인 신규 구독 요청 처리
+                while not _pending_queue.empty():
+                    code = _pending_queue.get()
+                    if code in _subscribed_codes:
+                        continue
+                    ws.send(_subscribe_frame(_approval_key, code))
+                    _subscribed_codes.add(code)
+                    time.sleep(0.05)  # 과도한 연속 전송 방지
+
+                try:
+                    data = ws.recv()
+                except websocket.WebSocketTimeoutException:
+                    continue
+
+                if not data:
+                    continue
+
+                if data[0] in ("0", "1"):
+                    parts = data.split("|")
+                    if len(parts) < 4:
+                        continue
+                    tr_id = parts[1]
+                    if tr_id != "H0STCNT0":
+                        continue
+                    # 여러 건이 한 번에 올 수 있음 (^로 필드 구분, 종목 단위 반복)
+                    body = parts[3]
+                    fields = body.split("^")
+                    tick = _parse_tick(fields)
+                    if tick:
+                        with _cache_lock:
+                            QUOTE_CACHE[tick["code"]] = tick
+                else:
+                    # PINGPONG 등 제어 메시지
+                    try:
+                        msg = json.loads(data)
+                        if msg.get("header", {}).get("tr_id") == "PINGPONG":
+                            ws.send(data)  # 그대로 되돌려줘야 연결 유지됨
+                    except json.JSONDecodeError:
+                        pass
+
+        except Exception as e:
+            print(f"[KIS WS] 연결 오류, 5초 후 재시도: {e}")
+            _ws_ready.clear()
+            time.sleep(5)
+
+
+def start_background():
+    if not APP_KEY or not APP_SECRET:
+        print("[KIS WS] KIS_APP_KEY / KIS_APP_SECRET 환경변수가 설정되지 않았습니다. "
+              "실시간 시세가 동작하지 않습니다.")
+        return
+    t = threading.Thread(target=_run_forever, daemon=True)
+    t.start()

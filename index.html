@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>StockTick · 관심종목</title>
+<link rel="manifest" href="/manifest.json">
+<meta name="theme-color" content="#0e1512">
+<link rel="apple-touch-icon" href="/static/icon-192.png">
+<link rel="icon" href="/static/icon-192.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="StockTick">
+<style>
+  :root {
+    --bg: #0e1512;
+    --card: #161f1b;
+    --card-hover: #1c2622;
+    --border: #253530;
+    --mint: #3ddc97;
+    --mint-dim: #2a9d73;
+    --red: #ff5c5c;
+    --blue: #5b9bff;
+    --text: #eaf5ef;
+    --text-dim: #8fa39a;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Pretendard", "Malgun Gothic", sans-serif;
+    min-height: 100vh;
+    padding-bottom: 40px;
+  }
+  header {
+    padding: 20px 16px 12px;
+    position: sticky;
+    top: 0;
+    background: linear-gradient(180deg, var(--bg) 80%, transparent);
+    z-index: 10;
+  }
+  header h1 {
+    font-size: 19px;
+    margin: 0 0 12px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  header h1 .dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--mint);
+    box-shadow: 0 0 8px var(--mint);
+    animation: pulse 1.6s infinite;
+  }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.35} }
+
+  .search-box {
+    position: relative;
+  }
+  .search-box input {
+    width: 100%;
+    padding: 12px 14px;
+    border-radius: 12px;
+    border: 1px solid var(--border);
+    background: var(--card);
+    color: var(--text);
+    font-size: 15px;
+    outline: none;
+  }
+  .search-box input:focus { border-color: var(--mint-dim); }
+  .search-results {
+    position: absolute;
+    top: calc(100% + 6px);
+    left: 0; right: 0;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    overflow: hidden;
+    z-index: 20;
+    max-height: 260px;
+    overflow-y: auto;
+    display: none;
+  }
+  .search-results.show { display: block; }
+  .search-item {
+    padding: 11px 14px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    cursor: pointer;
+    border-bottom: 1px solid var(--border);
+  }
+  .search-item:last-child { border-bottom: none; }
+  .search-item:active, .search-item:hover { background: var(--card-hover); }
+  .search-item .nm { font-size: 14px; }
+  .search-item .mk { font-size: 11px; color: var(--text-dim); }
+
+  main { padding: 4px 16px; }
+
+  .empty {
+    text-align: center;
+    color: var(--text-dim);
+    padding: 60px 20px;
+    font-size: 14px;
+    line-height: 1.6;
+  }
+
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 14px 16px;
+    margin-bottom: 10px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    transition: background .15s;
+    position: relative;
+    overflow: hidden;
+  }
+  .card.flash-up::after, .card.flash-down::after {
+    content: "";
+    position: absolute; inset: 0;
+    opacity: 0;
+    animation: flash .5s ease-out;
+    animation-fill-mode: forwards;
+    pointer-events: none;
+  }
+  .card.flash-up::after { background: var(--mint); }
+  .card.flash-down::after { background: var(--red); }
+  @keyframes flash { from { opacity: .18; } to { opacity: 0; } }
+
+  .left { display: flex; flex-direction: column; gap: 3px; }
+  .name { font-size: 15px; font-weight: 600; }
+  .code { font-size: 11px; color: var(--text-dim); }
+  .right { text-align: right; display: flex; flex-direction: column; gap: 3px; }
+  .price { font-size: 17px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .change { font-size: 12.5px; font-variant-numeric: tabular-nums; }
+  .up { color: var(--red); }
+  .down { color: var(--blue); }
+  .flat { color: var(--text-dim); }
+
+  .remove-btn {
+    background: none; border: none; color: var(--text-dim);
+    font-size: 18px; padding: 0 0 0 12px; cursor: pointer;
+    line-height: 1;
+  }
+
+  .footer-note {
+    text-align: center;
+    color: var(--text-dim);
+    font-size: 11px;
+    margin-top: 18px;
+    padding: 0 20px;
+    line-height: 1.6;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1><span class="dot"></span> 관심종목 시세</h1>
+  <div class="search-box">
+    <input id="searchInput" type="text" placeholder="종목명 또는 코드 검색 (예: 삼성전자)" autocomplete="off">
+    <div id="searchResults" class="search-results"></div>
+  </div>
+</header>
+
+<main>
+  <div id="list"></div>
+  <div id="emptyState" class="empty">
+    아직 등록된 종목이 없어요.<br>위 검색창에서 종목을 추가해보세요.
+  </div>
+</main>
+
+<div class="footer-note">
+  한국투자증권 실시간 체결가(웹소켓) · 2초마다 화면 갱신<br>
+  투자 참고용이며 매매 근거로 사용 시 책임지지 않습니다.
+</div>
+
+<script>
+const STORAGE_KEY = "stocktick_watchlist";
+let watchlist = JSON.parse(localStorage.getItem(STORAGE_KEY) || "[]"); // [{code,name,market}]
+let lastPrices = {}; // code -> price, for flash animation
+let pollTimer = null;
+
+const listEl = document.getElementById("list");
+const emptyEl = document.getElementById("emptyState");
+const searchInput = document.getElementById("searchInput");
+const searchResultsEl = document.getElementById("searchResults");
+
+function save() {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(watchlist));
+}
+
+function renderSkeleton() {
+  if (watchlist.length === 0) {
+    emptyEl.style.display = "block";
+    listEl.innerHTML = "";
+    return;
+  }
+  emptyEl.style.display = "none";
+  listEl.innerHTML = watchlist.map(item => `
+    <div class="card" id="card-${item.code}">
+      <div class="left">
+        <div class="name">${item.name}</div>
+        <div class="code">${item.code} · ${item.market || ""}</div>
+      </div>
+      <div class="right">
+        <div class="price" id="price-${item.code}">-</div>
+        <div class="change flat" id="change-${item.code}">-</div>
+      </div>
+      <button class="remove-btn" onclick="removeStock('${item.code}')">×</button>
+    </div>
+  `).join("");
+}
+
+function removeStock(code) {
+  watchlist = watchlist.filter(w => w.code !== code);
+  save();
+  renderSkeleton();
+  fetchQuotes();
+}
+
+function addStock(item) {
+  if (watchlist.some(w => w.code === item.code)) return;
+  watchlist.push(item);
+  save();
+  searchInput.value = "";
+  searchResultsEl.classList.remove("show");
+  renderSkeleton();
+  fetchQuotes();
+}
+
+let searchDebounce = null;
+searchInput.addEventListener("input", () => {
+  clearTimeout(searchDebounce);
+  const q = searchInput.value.trim();
+  if (!q) { searchResultsEl.classList.remove("show"); return; }
+  searchDebounce = setTimeout(() => doSearch(q), 300);
+});
+
+async function doSearch(q) {
+  try {
+    const res = await fetch(`/api/search?q=${encodeURIComponent(q)}`);
+    const data = await res.json();
+    if (!Array.isArray(data) || data.length === 0) {
+      searchResultsEl.innerHTML = `<div class="search-item"><span class="nm">검색 결과 없음</span></div>`;
+      searchResultsEl.classList.add("show");
+      return;
+    }
+    searchResultsEl.innerHTML = data.map(d => `
+      <div class="search-item" onclick='addStock(${JSON.stringify(d)})'>
+        <span class="nm">${d.name}</span>
+        <span class="mk">${d.market || ""} · ${d.code}</span>
+      </div>
+    `).join("");
+    searchResultsEl.classList.add("show");
+  } catch (e) {
+    console.error("search failed", e);
+  }
+}
+
+document.addEventListener("click", (e) => {
+  if (!e.target.closest(".search-box")) {
+    searchResultsEl.classList.remove("show");
+  }
+});
+
+function fmtNum(n) {
+  if (n === null || n === undefined) return "-";
+  return Number(n).toLocaleString("ko-KR");
+}
+
+async function fetchQuotes() {
+  if (watchlist.length === 0) return;
+  const codes = watchlist.map(w => w.code).join(",");
+  try {
+    const res = await fetch(`/api/quotes?codes=${codes}`);
+    const data = await res.json();
+    if (!Array.isArray(data)) return;
+
+    data.forEach(q => {
+      const priceEl = document.getElementById(`price-${q.code}`);
+      const changeEl = document.getElementById(`change-${q.code}`);
+      const cardEl = document.getElementById(`card-${q.code}`);
+      if (!priceEl || !changeEl) return;
+
+      const prev = lastPrices[q.code];
+      priceEl.textContent = fmtNum(q.price);
+
+      const dir = q.change > 0 ? "up" : q.change < 0 ? "down" : "flat";
+      const arrow = q.change > 0 ? "▲" : q.change < 0 ? "▼" : "-";
+      changeEl.className = `change ${dir}`;
+      changeEl.textContent = `${arrow} ${fmtNum(Math.abs(q.change))} (${q.rate > 0 ? "+" : ""}${q.rate}%)`;
+
+      if (cardEl && prev !== undefined && prev !== q.price) {
+        cardEl.classList.remove("flash-up", "flash-down");
+        void cardEl.offsetWidth; // reflow to restart animation
+        cardEl.classList.add(q.price > prev ? "flash-up" : "flash-down");
+      }
+      lastPrices[q.code] = q.price;
+    });
+  } catch (e) {
+    console.error("quote fetch failed", e);
+  }
+}
+
+function startPolling() {
+  if (pollTimer) clearInterval(pollTimer);
+  fetchQuotes();
+  pollTimer = setInterval(fetchQuotes, 2000);
+}
+
+renderSkeleton();
+startPolling();
+
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("/sw.js").catch((e) => console.error("SW 등록 실패", e));
+  });
+}
+</script>
+
+</body>
+</html>
