@@ -121,8 +121,10 @@ def _run_forever():
     while True:
         try:
             _approval_key = _get_approval_key()
+            print(f"[KIS WS] approval_key 발급 성공: {_approval_key[:8]}...", flush=True)
             ws = websocket.WebSocket()
             ws.connect(WS_URL, ping_interval=60)
+            print(f"[KIS WS] 웹소켓 연결 성공: {WS_URL}", flush=True)
             ws.settimeout(1.0)
             _subscribed_codes.clear()
             _ws_ready.set()
@@ -135,6 +137,7 @@ def _run_forever():
                         continue
                     ws.send(_subscribe_frame(_approval_key, code))
                     _subscribed_codes.add(code)
+                    print(f"[KIS WS] 구독 등록: {code}", flush=True)
                     time.sleep(0.05)  # 과도한 연속 전송 방지
 
                 try:
@@ -169,7 +172,7 @@ def _run_forever():
                         pass
 
         except Exception as e:
-            print(f"[KIS WS] 연결 오류, 5초 후 재시도: {e}")
+            print(f"[KIS WS] 연결 오류, 5초 후 재시도: {e}", flush=True)
             _ws_ready.clear()
             time.sleep(5)
 
@@ -177,7 +180,7 @@ def _run_forever():
 def start_background():
     if not APP_KEY or not APP_SECRET:
         print("[KIS WS] KIS_APP_KEY / KIS_APP_SECRET 환경변수가 설정되지 않았습니다. "
-              "실시간 시세가 동작하지 않습니다.")
+              "실시간 시세가 동작하지 않습니다.", flush=True)
         return
     t = threading.Thread(target=_run_forever, daemon=True)
     t.start()

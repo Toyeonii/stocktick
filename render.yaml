@@ -12,3 +12,5 @@ services:
         sync: false
       - key: KIS_VIRTUAL
         value: "0"
+      - key: PYTHONUNBUFFERED
+        value: "1"
