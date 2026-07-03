@@ -91,6 +91,25 @@ def net_test():
     except Exception as e:
         results["dns"] = {"ok": False, "error": f"{type(e).__name__}: {e}", "elapsed_sec": round(_time.time() - t0, 2)}
 
+    # 4) 실제 approval_key 발급 요청을 여기서 직접 한번 호출 (백그라운드 스레드가 아닌
+    #    일반 요청 컨텍스트에서도 똑같이 멈추는지 확인용 - 키/시크릿 값 자체는 응답에 노출 안 함)
+    t0 = _time.time()
+    try:
+        body = {
+            "grant_type": "client_credentials",
+            "appkey": kis_client.APP_KEY,
+            "secretkey": kis_client.APP_SECRET,
+        }
+        r = _requests.post(f"{kis_client.REST_BASE}/oauth2/Approval", json=body, timeout=8)
+        ok = r.status_code == 200 and "approval_key" in r.json()
+        results["oauth_approval"] = {
+            "ok": ok, "status": r.status_code,
+            "elapsed_sec": round(_time.time() - t0, 2),
+            "body_preview": r.text[:150],
+        }
+    except Exception as e:
+        results["oauth_approval"] = {"ok": False, "error": f"{type(e).__name__}: {e}", "elapsed_sec": round(_time.time() - t0, 2)}
+
     return jsonify(results)
 
 
