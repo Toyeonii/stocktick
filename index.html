@@ -178,7 +178,15 @@
   .search-item:last-child { border-bottom: none; }
   .search-item:active, .search-item:hover { background: rgba(255,255,255,.03); }
   .search-item .nm { font-size: 14px; font-weight: 500; }
+  .search-item .right-meta { display: flex; align-items: center; gap: 10px; }
   .search-item .mk { font-size: 10.5px; color: var(--text-faint); font-family: var(--font-num); }
+  .search-item .add-flag {
+    font-size: 11px; font-weight: 600; color: var(--mint);
+    white-space: nowrap;
+  }
+  .search-item.added { cursor: default; }
+  .search-item.added .nm { color: var(--text-dim); }
+  .search-item.added .add-flag { color: var(--text-faint); }
 
   main { padding: 4px 18px; }
 
@@ -414,22 +422,43 @@ function renderSkeleton() {
   `).join("");
 }
 
+let lastSearchResults = []; // 현재 검색 결과 목록 (추가 상태 갱신용)
+
+function renderSearchResults() {
+  if (!Array.isArray(lastSearchResults) || lastSearchResults.length === 0) {
+    searchResultsEl.innerHTML = `<div class="search-item"><span class="nm">검색 결과 없음</span></div>`;
+    return;
+  }
+  searchResultsEl.innerHTML = lastSearchResults.map(d => {
+    const added = watchlist.some(w => w.code === d.code);
+    return `
+      <div class="search-item ${added ? "added" : ""}" ${added ? "" : `onclick='event.stopPropagation(); addStock(${JSON.stringify(d)})'`}>
+        <span class="nm">${d.name}</span>
+        <span class="right-meta">
+          <span class="mk">${d.market || ""} · ${d.code}</span>
+          <span class="add-flag">${added ? "✓ 추가됨" : "+ 추가"}</span>
+        </span>
+      </div>
+    `;
+  }).join("");
+}
+
 function removeStock(code) {
   watchlist = watchlist.filter(w => w.code !== code);
   delete priceHistory[code];
   save();
   renderSkeleton();
   fetchQuotes();
+  renderSearchResults(); // 검색 목록 열려있으면 '추가됨' 상태도 갱신
 }
 
 function addStock(item) {
   if (watchlist.some(w => w.code === item.code)) return;
   watchlist.push(item);
   save();
-  searchInput.value = "";
-  searchResultsEl.classList.remove("show");
   renderSkeleton();
   fetchQuotes();
+  renderSearchResults(); // 검색창은 안 닫고, 방금 추가한 항목만 '추가됨'으로 갱신
 }
 
 let searchDebounce = null;
@@ -444,17 +473,8 @@ async function doSearch(q) {
   try {
     const res = await fetch(`/api/search?q=${encodeURIComponent(q)}`);
     const data = await res.json();
-    if (!Array.isArray(data) || data.length === 0) {
-      searchResultsEl.innerHTML = `<div class="search-item"><span class="nm">검색 결과 없음</span></div>`;
-      searchResultsEl.classList.add("show");
-      return;
-    }
-    searchResultsEl.innerHTML = data.map(d => `
-      <div class="search-item" onclick='addStock(${JSON.stringify(d)})'>
-        <span class="nm">${d.name}</span>
-        <span class="mk">${d.market || ""} · ${d.code}</span>
-      </div>
-    `).join("");
+    lastSearchResults = Array.isArray(data) ? data : [];
+    renderSearchResults();
     searchResultsEl.classList.add("show");
   } catch (e) {
     console.error("search failed", e);
