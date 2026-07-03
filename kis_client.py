@@ -218,6 +218,19 @@ def _run_forever():
             time.sleep(5)
 
 
+def restart():
+    """재배포 없이 세션/스레드를 강제로 새로 시작 (디버깅용)"""
+    global _http_session
+    print("[KIS WS] 강제 재시작 요청됨 - 세션 새로 생성", flush=True)
+    _http_session = requests.Session()
+    _http_session.trust_env = False
+    _status["phase"] = "restarting"
+    _status["last_error"] = None
+    _status["last_error_at"] = None
+    t = threading.Thread(target=_run_forever, daemon=True)
+    t.start()
+
+
 def start_background():
     if not APP_KEY or not APP_SECRET:
         _status["phase"] = "disabled_no_key"

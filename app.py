@@ -56,6 +56,26 @@ def quotes():
     return jsonify(out)
 
 
+@app.route("/api/kis-restart")
+def kis_restart():
+    """재배포 없이 KIS 연결 스레드를 강제로 새로 시작 (디버깅용)"""
+    kis_client.restart()
+    return jsonify({"ok": True, "message": "재시작 요청함, 몇 초 후 /api/kis-status 확인"})
+
+
+@app.route("/api/kis-approval-direct-test")
+def kis_approval_direct_test():
+    """백그라운드 스레드가 실제로 사용하는 kis_client._get_approval_key()를
+    그대로 호출해서 그 함수/세션 자체에 문제가 있는지 직접 확인"""
+    import time as _time
+    t0 = _time.time()
+    try:
+        key = kis_client._get_approval_key()
+        return jsonify({"ok": True, "elapsed_sec": round(_time.time() - t0, 2), "key_preview": key[:8] + "..."})
+    except Exception as e:
+        return jsonify({"ok": False, "elapsed_sec": round(_time.time() - t0, 2), "error": f"{type(e).__name__}: {e}"})
+
+
 @app.route("/api/net-test")
 def net_test():
     """Shell 없이도 서버에서 직접 아웃바운드 네트워크 상태를 진단"""
