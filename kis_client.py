@@ -135,11 +135,15 @@ def ensure_subscribed(code):
     _pending_queue.put(code)
 
 
+_rest_session = requests.Session()
+_rest_session.trust_env = False
+
 _access_token_lock = threading.Lock()
 _access_token = {"token": None, "expires_at": 0}
 
 REST_QUOTE_CACHE = {}          # code -> {"data": {...}, "fetched_at": ts}
-REST_QUOTE_TTL = 5             # 초 (너무 자주 REST 호출하지 않도록 짧게 캐싱)
+REST_QUOTE_TTL = 20            # 초 (종가성 데이터라 자주 바뀌지 않고, 장애 시 반복 실패 방지에도 도움)
+REST_TIMEOUT = 5               # 초 (KIS 장애/점검 시 요청 스레드가 오래 안 묶이도록 짧게)
 
 
 def _get_access_token():
@@ -151,7 +155,7 @@ def _get_access_token():
 
         url = f"{REST_BASE}/oauth2/tokenP"
         body = {"grant_type": "client_credentials", "appkey": APP_KEY, "appsecret": APP_SECRET}
-        resp = _http_session.post(url, json=body, timeout=10)
+        resp = _rest_session.post(url, json=body, timeout=REST_TIMEOUT)
         resp.raise_for_status()
         data = resp.json()
         _access_token["token"] = data["access_token"]
@@ -177,9 +181,9 @@ def get_rest_quote(code):
             "custtype": "P",
         }
         params = {"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": code}
-        resp = _http_session.get(
+        resp = _rest_session.get(
             f"{REST_BASE}/uapi/domestic-stock/v1/quotations/inquire-price",
-            headers=headers, params=params, timeout=8,
+            headers=headers, params=params, timeout=REST_TIMEOUT,
         )
         resp.raise_for_status()
         out = resp.json().get("output", {})
@@ -206,6 +210,7 @@ def get_rest_quote(code):
         return result
     except Exception as e:
         print(f"[KIS REST] 시세 조회 실패 ({code}): {type(e).__name__}: {e}", flush=True)
+        REST_QUOTE_CACHE[code] = {"data": None, "fetched_at": now}  # 실패도 잠깐 캐싱(연속 실패로 인한 지연 누적 방지)
         return None
 
 
