@@ -270,6 +270,17 @@
     font-variant-numeric: tabular-nums;
     letter-spacing: -.01em;
   }
+  .close-badge {
+    font-family: var(--font-ui);
+    font-size: 9.5px; font-weight: 600;
+    color: var(--text-faint);
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    padding: 1px 5px;
+    margin-left: 4px;
+    vertical-align: 1px;
+  }
   .change {
     font-family: var(--font-num);
     font-size: 11.5px; font-weight: 500;
@@ -536,10 +547,12 @@ async function fetchQuotes() {
       const cardEl = document.getElementById(`card-${q.code}`);
       if (!priceEl || !changeEl) return;
 
-      if (q.price === null || q.price === undefined) return; // 아직 데이터 없음 (장마감 등)
+      if (q.price === null || q.price === undefined) return; // 아직 데이터 없음
 
       const prev = lastPrices[q.code];
-      priceEl.textContent = fmtNum(q.price);
+      priceEl.innerHTML = q.live === false
+        ? `${fmtNum(q.price)} <span class="close-badge">종가</span>`
+        : fmtNum(q.price);
 
       const dir = q.change > 0 ? "up" : q.change < 0 ? "down" : "flat";
       const arrow = q.change > 0 ? "▲" : q.change < 0 ? "▼" : "－";

@@ -33,7 +33,7 @@ def search():
 @app.route("/api/quotes")
 def quotes():
     """콤마로 구분된 종목코드 리스트 -> KIS 웹소켓 캐시에서 최신 체결가 반환.
-    아직 구독 전이거나 첫 틱이 안 들어온 종목은 price=None으로 내려감(프론트에서 '-' 처리)."""
+    웹소켓 실시간 틱이 아직 없으면(장마감 등) REST로 종가/마지막 체결가를 대신 조회함."""
     codes = request.args.get("codes", "").strip()
     if not codes:
         return jsonify([])
@@ -42,16 +42,23 @@ def quotes():
     out = []
     for code in code_list:
         kis_client.ensure_subscribed(code)
-        tick = kis_client.get_quote(code)
         name = next((s["name"] for s in STOCK_LIST if s["code"] == code), None)
+
+        tick = kis_client.get_quote(code)
         if tick:
             out.append({**tick, "name": name})
-        else:
-            out.append({
-                "code": code, "name": name, "price": None, "change": None,
-                "rate": None, "open": None, "high": None, "low": None,
-                "volume": None, "sign": None,
-            })
+            continue
+
+        rest = kis_client.get_rest_quote(code)
+        if rest:
+            out.append({**rest, "name": name})
+            continue
+
+        out.append({
+            "code": code, "name": name, "price": None, "change": None,
+            "rate": None, "open": None, "high": None, "low": None,
+            "volume": None, "sign": None, "live": False,
+        })
 
     return jsonify(out)
 

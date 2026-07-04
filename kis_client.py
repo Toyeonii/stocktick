@@ -122,6 +122,7 @@ def _parse_tick(raw_fields):
         "volume": volume,
         "sign": sign,
         "ts": raw_fields[1],
+        "live": True,
     }
 
 
@@ -132,6 +133,80 @@ def ensure_subscribed(code):
     if len(_subscribed_codes) >= MAX_SUBSCRIPTIONS:
         return  # 정책 한도 초과 시 조용히 무시 (필요하면 여기서 에러 표시 가능)
     _pending_queue.put(code)
+
+
+_access_token_lock = threading.Lock()
+_access_token = {"token": None, "expires_at": 0}
+
+REST_QUOTE_CACHE = {}          # code -> {"data": {...}, "fetched_at": ts}
+REST_QUOTE_TTL = 5             # 초 (너무 자주 REST 호출하지 않도록 짧게 캐싱)
+
+
+def _get_access_token():
+    """일반 REST 조회용 access token 발급 (approval_key와는 별개, 유효기간 24시간이라 캐싱해서 재사용)"""
+    with _access_token_lock:
+        now = time.time()
+        if _access_token["token"] and now < _access_token["expires_at"] - 60:
+            return _access_token["token"]
+
+        url = f"{REST_BASE}/oauth2/tokenP"
+        body = {"grant_type": "client_credentials", "appkey": APP_KEY, "appsecret": APP_SECRET}
+        resp = _http_session.post(url, json=body, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        _access_token["token"] = data["access_token"]
+        _access_token["expires_at"] = now + int(data.get("expires_in", 86400))
+        print("[KIS REST] access token 발급/갱신 완료", flush=True)
+        return _access_token["token"]
+
+
+def get_rest_quote(code):
+    """웹소켓 실시간 틱이 없을 때(장마감 등) 쓰는 REST 시세 조회 - 종가/마지막 체결가를 반환"""
+    now = time.time()
+    cached = REST_QUOTE_CACHE.get(code)
+    if cached and now - cached["fetched_at"] < REST_QUOTE_TTL:
+        return cached["data"]
+
+    try:
+        token = _get_access_token()
+        headers = {
+            "authorization": f"Bearer {token}",
+            "appkey": APP_KEY,
+            "appsecret": APP_SECRET,
+            "tr_id": "FHKST01010100",
+            "custtype": "P",
+        }
+        params = {"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": code}
+        resp = _http_session.get(
+            f"{REST_BASE}/uapi/domestic-stock/v1/quotations/inquire-price",
+            headers=headers, params=params, timeout=8,
+        )
+        resp.raise_for_status()
+        out = resp.json().get("output", {})
+        if not out:
+            return None
+
+        sign = out.get("prdy_vrss_sign", "3")  # 1상한 2상승 3보합 4하한 5하락
+        mult = -1 if sign in ("4", "5") else 1
+
+        result = {
+            "code": code,
+            "price": float(out.get("stck_prpr") or 0),
+            "change": float(out.get("prdy_vrss") or 0) * mult,
+            "rate": float(out.get("prdy_ctrt") or 0) * mult,
+            "open": float(out.get("stck_oprc") or 0),
+            "high": float(out.get("stck_hgpr") or 0),
+            "low": float(out.get("stck_lwpr") or 0),
+            "volume": float(out.get("acml_vol") or 0),
+            "sign": sign,
+            "ts": None,
+            "live": False,   # 실시간 체결이 아니라 REST 조회(종가 등)임을 표시
+        }
+        REST_QUOTE_CACHE[code] = {"data": result, "fetched_at": now}
+        return result
+    except Exception as e:
+        print(f"[KIS REST] 시세 조회 실패 ({code}): {type(e).__name__}: {e}", flush=True)
+        return None
 
 
 def get_quote(code):
