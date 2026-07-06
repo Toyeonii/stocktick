@@ -220,6 +220,38 @@ def get_rest_quote(code):
         return None
 
 
+STOCK_NAME_CACHE = {}  # code -> name (검증된 종목이라 자주 안 바뀌므로 영구 캐싱)
+
+
+def get_stock_name(code):
+    """내장 리스트에 없는 종목코드의 이름을 KIS 상품기본조회 API로 조회"""
+    if code in STOCK_NAME_CACHE:
+        return STOCK_NAME_CACHE[code]
+    try:
+        token = _get_access_token()
+        headers = {
+            "authorization": f"Bearer {token}",
+            "appkey": APP_KEY,
+            "appsecret": APP_SECRET,
+            "tr_id": "CTPF1002R",
+            "custtype": "P",
+        }
+        params = {"PDNO": code, "PRDT_TYPE_CD": "300"}
+        r = _rest_session.get(
+            f"{REST_BASE}/uapi/domestic-stock/v1/quotations/search-info",
+            headers=headers, params=params, timeout=REST_TIMEOUT,
+        )
+        r.raise_for_status()
+        name = r.json().get("output", {}).get("prdt_abrv_name")
+        if name:
+            name = name.strip()
+            STOCK_NAME_CACHE[code] = name
+        return name
+    except Exception as e:
+        print(f"[KIS REST] 종목명 조회 실패 ({code}): {type(e).__name__}: {e}", flush=True)
+        return None
+
+
 def get_quote(code):
     with _cache_lock:
         return QUOTE_CACHE.get(code)

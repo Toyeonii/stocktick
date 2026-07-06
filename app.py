@@ -23,9 +23,14 @@ def search():
 
     results = [s for s in STOCK_LIST if q in s["name"] or q in s["code"]]
 
-    # 6자리 숫자 코드를 직접 입력했는데 리스트에 없는 경우, 그대로 추가할 수 있게 허용
+    # 6자리 숫자 코드를 직접 입력했는데 리스트에 없는 경우, KIS API로 이름 조회해서 추가
     if re.fullmatch(r"\d{6}", q) and not any(s["code"] == q for s in results):
-        results.insert(0, {"name": f"코드 {q} (직접입력)", "code": q, "market": "?"})
+        name = kis_client.get_stock_name(q)
+        results.insert(0, {
+            "name": name if name else f"코드 {q} (이름 조회 실패)",
+            "code": q,
+            "market": "?",
+        })
 
     return jsonify(results[:15])
 
