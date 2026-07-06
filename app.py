@@ -63,6 +63,33 @@ def quotes():
     return jsonify(out)
 
 
+@app.route("/api/rest-quote-debug")
+def rest_quote_debug():
+    """REST 종가 조회의 원본 응답을 그대로 노출 (파싱 전/후 비교용)"""
+    code = request.args.get("code", "005930")
+    import time as _time
+    try:
+        token = kis_client._get_access_token()
+        headers = {
+            "authorization": f"Bearer {token}",
+            "appkey": kis_client.APP_KEY,
+            "appsecret": kis_client.APP_SECRET,
+            "tr_id": "FHKST01010100",
+            "custtype": "P",
+        }
+        params = {"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": code}
+        t0 = _time.time()
+        r = kis_client._rest_session.get(
+            f"{kis_client.REST_BASE}/uapi/domestic-stock/v1/quotations/inquire-price",
+            headers=headers, params=params, timeout=8,
+        )
+        raw = r.json()
+        parsed = kis_client.get_rest_quote(code)
+        return jsonify({"elapsed_sec": round(_time.time()-t0,2), "raw_output": raw.get("output"), "parsed": parsed})
+    except Exception as e:
+        return jsonify({"error": f"{type(e).__name__}: {e}"})
+
+
 @app.route("/api/kis-restart")
 def kis_restart():
     """재배포 없이 KIS 연결 스레드를 강제로 새로 시작 (디버깅용)"""
