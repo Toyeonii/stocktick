@@ -76,6 +76,29 @@ def ws_raw_debug():
     })
 
 
+@app.route("/api/stock-name-debug")
+def stock_name_debug():
+    """종목명 조회용 후보 API(상품기본조회)를 시험 호출 - 검증 전이라 원본 응답 그대로 노출"""
+    code = request.args.get("code", "000660")
+    try:
+        token = kis_client._get_access_token()
+        headers = {
+            "authorization": f"Bearer {token}",
+            "appkey": kis_client.APP_KEY,
+            "appsecret": kis_client.APP_SECRET,
+            "tr_id": "CTPF1002R",
+            "custtype": "P",
+        }
+        params = {"PDNO": code, "PRDT_TYPE_CD": "300"}
+        r = kis_client._rest_session.get(
+            f"{kis_client.REST_BASE}/uapi/domestic-stock/v1/quotations/search-info",
+            headers=headers, params=params, timeout=8,
+        )
+        return jsonify({"status_code": r.status_code, "raw": r.json()})
+    except Exception as e:
+        return jsonify({"error": f"{type(e).__name__}: {e}"})
+
+
 @app.route("/api/rest-quote-debug")
 def rest_quote_debug():
     """REST 종가 조회의 원본 응답을 그대로 노출 (파싱 전/후 비교용)"""
