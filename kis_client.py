@@ -190,14 +190,16 @@ def get_rest_quote(code):
         if not out:
             return None
 
+        # 주의: REST 응답의 prdy_vrss/prdy_ctrt는 이미 부호(-)가 포함된 값이라
+        # sign 필드로 다시 곱하면 안 됨 (그러면 부호가 두 번 적용돼 뒤집힘).
+        # sign은 표시용(상한/하한 등)으로만 참고.
         sign = out.get("prdy_vrss_sign", "3")  # 1상한 2상승 3보합 4하한 5하락
-        mult = -1 if sign in ("4", "5") else 1
 
         result = {
             "code": code,
             "price": float(out.get("stck_prpr") or 0),
-            "change": float(out.get("prdy_vrss") or 0) * mult,
-            "rate": float(out.get("prdy_ctrt") or 0) * mult,
+            "change": float(out.get("prdy_vrss") or 0),
+            "rate": float(out.get("prdy_ctrt") or 0),
             "open": float(out.get("stck_oprc") or 0),
             "high": float(out.get("stck_hgpr") or 0),
             "low": float(out.get("stck_lwpr") or 0),
