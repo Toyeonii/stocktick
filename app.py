@@ -63,6 +63,19 @@ def quotes():
     return jsonify(out)
 
 
+@app.route("/api/ws-raw-debug")
+def ws_raw_debug():
+    """웹소켓으로 받은 원본 필드 그대로 노출 (부호 규칙 검증용)"""
+    code = request.args.get("code", "")
+    raw = kis_client.LAST_RAW_TICK.get(code)
+    if raw is None:
+        return jsonify({"error": "아직 이 종목의 실시간 틱을 못 받았음"})
+    return jsonify({
+        "code": raw[0], "time": raw[1], "price(2)": raw[2], "sign(3)": raw[3],
+        "change(4)": raw[4], "rate(5)": raw[5], "all_fields": raw,
+    })
+
+
 @app.route("/api/rest-quote-debug")
 def rest_quote_debug():
     """REST 종가 조회의 원본 응답을 그대로 노출 (파싱 전/후 비교용)"""

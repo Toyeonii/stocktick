@@ -92,12 +92,16 @@ def _subscribe_frame(approval_key, code, tr_type="1"):
     })
 
 
+LAST_RAW_TICK = {}  # code -> raw fields 리스트 (디버그용, 부호 규칙 검증용)
+
+
 def _parse_tick(raw_fields):
     """H0STCNT0 필드 배열 -> 우리 앱에서 쓰는 dict"""
     # 0:종목코드 1:체결시간 2:현재가 3:전일대비부호 4:전일대비 5:전일대비율
     # 6:가중평균가 7:시가 8:고가 9:저가 10:매도호가1 11:매수호가1
     # 12:체결거래량 13:누적거래량 14:누적거래대금 ...
     code = raw_fields[0]
+    LAST_RAW_TICK[code] = raw_fields  # 디버그용 원본 저장
     sign = raw_fields[3]  # 1상한 2상승 3보합 4하한 5하락
     mult = -1 if sign in ("4", "5") else 1
     try:
