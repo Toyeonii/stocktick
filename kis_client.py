@@ -103,11 +103,12 @@ def _parse_tick(raw_fields):
     code = raw_fields[0]
     LAST_RAW_TICK[code] = raw_fields  # 디버그용 원본 저장
     sign = raw_fields[3]  # 1상한 2상승 3보합 4하한 5하락
-    mult = -1 if sign in ("4", "5") else 1
+    # 주의: raw_fields[4](전일대비), raw_fields[5](전일대비율)는 이미 부호(-)가 포함된 값.
+    # sign으로 다시 곱하면 부호가 두 번 적용돼 뒤집힘 (REST와 동일한 실수였음).
     try:
         price = float(raw_fields[2])
-        change = float(raw_fields[4]) * mult
-        rate = float(raw_fields[5]) * mult
+        change = float(raw_fields[4])
+        rate = float(raw_fields[5])
         open_ = float(raw_fields[7])
         high = float(raw_fields[8])
         low = float(raw_fields[9])
