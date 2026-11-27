@@ -487,6 +487,31 @@ def kr_index_debug():
     return jsonify(out)
 
 
+@app.route("/api/qqq")
+def qqq():
+    """나스닥100 ETF(QQQ): 한국 낮에는 주간거래, 그 밖에는 나스닥(프리·정규장) 가격"""
+    try:
+        return jsonify(kis_client.get_qqq())
+    except Exception as e:
+        return jsonify({"error": f"QQQ 조회 실패: {e}"}), 502
+
+
+@app.route("/api/qqq-debug")
+def qqq_debug():
+    """[확인용] QQQ(나스닥100 ETF)를 주간거래(BAQ)와 정규(NAS) 시장 코드로 조회해서 응답 비교"""
+    symb = request.args.get("symb", "QQQ").upper()
+    out = {"확인시각": time.strftime("%H:%M:%S"), "종목": symb}
+    for excd in ("BAQ", "NAS"):
+        try:
+            status, body = kis_client._fetch_overseas_price_raw(excd, symb)
+            out[excd] = {"http": status, "rt_cd": body.get("rt_cd"), "msg_cd": body.get("msg_cd"),
+                         "msg1": body.get("msg1"), "output": body.get("output")}
+        except Exception as e:
+            out[excd] = {"error": f"{type(e).__name__}: {e}"}
+        time.sleep(0.5)   # 지금 키의 낮은 호출 한도 고려
+    return jsonify(out)
+
+
 @app.route("/api/us-indices")
 def us_indices():
     """미국 지수: 다우, S&P500, 나스닥, 필라델피아 반도체"""

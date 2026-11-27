@@ -906,6 +906,50 @@ def get_index_history(key, start, end, period="D"):
     return data
 
 
+# ---------- 해외주식 현재가 (QQQ 주간거래 확인용) ----------
+def _fetch_overseas_price_raw(excd, symb):
+    """해외주식 현재가(HHDFS00000300). EXCD: NAS 나스닥, BAQ 나스닥 주간거래 등"""
+    return _kis_get("HHDFS00000300", "/uapi/overseas-price/v1/quotations/price",
+                    {"AUTH": "", "EXCD": excd, "SYMB": symb})
+
+
+QQQ_CACHE = {"data": None, "fetched_at": 0.0}
+QQQ_TTL = 30
+
+
+def _qqq_session():
+    """한국 시간 기준으로 어느 시장 가격을 볼지. (주간거래 BAQ / 나스닥 NAS)
+    미국 서머타임은 고려하지 않은 대략적인 구분 (겨울 기준)"""
+    now = datetime.now(KST)
+    m = now.hour * 60 + now.minute
+    weekday = now.weekday() < 5
+    if weekday and 9 * 60 <= m < 18 * 60:
+        return "BAQ", "주간거래"
+    if weekday and 18 * 60 <= m < 23 * 60 + 30:
+        return "NAS", "프리마켓"
+    if (weekday and m >= 23 * 60 + 30) or (now.weekday() in (1, 2, 3, 4, 5) and m < 6 * 60):
+        return "NAS", "정규장"
+    return "NAS", "마감"
+
+
+def get_qqq():
+    """나스닥100 ETF(QQQ) 시세 -> {price, change, rate, session}. 한국 낮에는 주간거래 가격"""
+    now = time.time()
+    if QQQ_CACHE["data"] and now - QQQ_CACHE["fetched_at"] < QQQ_TTL:
+        return QQQ_CACHE["data"]
+    excd, session = _qqq_session()
+    status, body = _fetch_overseas_price_raw(excd, "QQQ")
+    o = body.get("output") or {}
+    price = _num(o.get("last"))
+    if body.get("rt_cd") != "0" or not price:
+        raise RuntimeError(f"QQQ 시세 없음 [{body.get('msg_cd')}] {body.get('msg1')}")
+    sign = o.get("sign")
+    data = {"price": price, "change": _signed(o.get("diff"), sign), "rate": _signed(o.get("rate"), sign),
+            "base": _num(o.get("base")), "session": session, "market": excd}
+    QQQ_CACHE.update(data=data, fetched_at=now)
+    return data
+
+
 # ---------- 미국 지수 ----------
 # 확인 결과: SPX/COMP/SOX는 output1에 현재가 요약이 오고, .DJI는 output1이 0이라 output2(일별)로 계산
 US_INDICES = [("dji", "다우", ".DJI"), ("spx", "S&P500", "SPX"), ("comp", "나스닥", "COMP"), ("sox", "필라델피아 반도체", "SOX")]

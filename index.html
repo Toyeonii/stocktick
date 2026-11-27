@@ -133,6 +133,10 @@
   .idx-tip .hint { margin-top: 6px; font-size: 11px; color: var(--faint); }
   /* 지수 차트: 종목 전용 정보(시세·투자정보, 매매동향 탭)를 숨기고 차트를 넓게 */
   .detail-body.index-mode .info-grid, .detail-body.index-mode .info-col { display: none; }
+  .ucell.qqq { margin-top: 6px; cursor: default; }
+  .ucell.qqq .nm b { color: var(--text); font-weight: 700; }
+  .ucell.qqq .ses { margin-left: 4px; font-size: 10.5px; color: var(--gold); }
+  .ucell.qqq .qrow { display: flex; align-items: baseline; gap: 10px; margin-top: 2px; }
   .usidx-note { margin-top: 6px; font-size: 10.5px; color: var(--faint); }
   .groups { display: flex; gap: 6px; padding: 0 18px 10px; align-items: center; }
   .glist { display: flex; gap: 6px; flex: 1 1 auto; min-width: 0; overflow-x: auto; scrollbar-width: none; }
@@ -464,6 +468,10 @@
   <div class="usidx" id="usIdx" hidden>
     <div class="usidx-grid" id="krIdxGrid"></div>
     <div class="usidx-grid" id="usIdxGrid"></div>
+    <div class="ucell qqq num" id="qqqCell" hidden title="나스닥100을 따라가는 ETF. 한국 낮에는 주간거래, 저녁에는 프리마켓, 밤에는 정규장 가격이에요">
+      <div class="nm">나스닥100 <b>QQQ</b> <span class="ses" id="qqqSes"></span></div>
+      <div class="qrow"><span class="pr" id="qqqPrice">-</span><span class="rt" id="qqqChg">-</span></div>
+    </div>
     <div class="usidx-note" id="usIdxNote"></div>
   </div>
   <div class="groups" id="groups">
@@ -1150,7 +1158,20 @@ function clampRange(r) {
   clamping = false;
 }
 
-function volBar(b) { return { time: b.time, value: b.volume, color: b.close >= b.open ? "rgba(240,68,82,.32)" : "rgba(61,139,255,.32)" }; }
+// 거래량 막대: 캔들과 같은 색 (양봉 빨강, 음봉 파랑)
+// 거래량 막대: 캔들과 같은 색. 높이는 volCap을 넘지 않게 잘라서
+// 거래량이 튀는 며칠 때문에 나머지 막대가 바닥에 붙지 않게 함 (범례에는 실제 값이 나옴)
+let volCap = Infinity;
+function volBar(b) {
+  return { time: b.time, value: Math.min(b.volume, volCap), color: b.close >= b.open ? C.up : C.down };
+}
+// 상위 5%를 뺀 값의 1.5배를 막대 높이 상한으로 (튀는 날은 꼭대기에 닿아 눈에 띄게). 가장 큰 값이 그 기준의 2배를 넘을 때만 적용
+function computeVolCap(bars) {
+  const v = bars.map(b => b.volume).filter(x => x > 0).sort((a, b) => a - b);
+  if (v.length < 20) return Infinity;
+  const p95 = v[Math.floor(0.95 * (v.length - 1))];
+  return v.at(-1) > p95 * 2 ? p95 * 1.5 : Infinity;
+}
 function chartNum(v) {
   return chartState && chartState.kind === "index"
     ? Number(v).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })
@@ -1680,6 +1701,7 @@ async function loadHistory() {
     chartState.includesToday = end >= ymd(kstDate());
     // 라이브러리가 넘겨받은 객체의 time을 변형하므로 원본(chartState.bars)은 보존하고 복사본을 넘김
     candleSeries.setData(data.bars.map(b => ({ ...b })));
+    volCap = computeVolCap(data.bars);
     volSeries.setData(data.bars.map(volBar));
     applyMA();
     // 앞쪽 추가분은 이동평균 계산용이라 화면에는 선택한 기간만 보여줌 (끌면 앞쪽도 볼 수 있음)
@@ -1996,6 +2018,25 @@ async function loadUsIndices() {
 }
 loadUsIndices();
 setInterval(loadUsIndices, 60000);
+
+// 나스닥100 QQQ (1분마다)
+async function loadQqq() {
+  try {
+    const r = await fetch("/api/qqq");
+    if (!r.ok) return;
+    const q = await r.json();
+    const d = dirOf(q.rate || 0);
+    $("qqqPrice").textContent = "$" + f2(q.price);
+    const ch = $("qqqChg");
+    ch.className = `rt ${d}`;
+    ch.textContent = `${d === "up" ? "▲" : d === "down" ? "▼" : ""}${Math.abs(q.change).toFixed(2)}(${fmtRate(q.rate)})`;
+    $("qqqSes").textContent = q.session;
+    $("qqqCell").hidden = false;
+    $("usIdx").hidden = false;
+  } catch (e) { /* 없어도 나머지 동작에 지장 없음 */ }
+}
+loadQqq();
+setInterval(loadQqq, 60000);
 
 // ---------- 창 크기 확인 (로고 클릭 또는 Alt+Shift+S) ----------
 let sizeTimer = null;
