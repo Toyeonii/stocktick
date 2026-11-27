@@ -1,3 +1,13 @@
-.env
-__pycache__/
 *.pyc
+*.spec
+*.tmp
+.env
+.kis_token.json
+.release/
+__pycache__/
+build/
+dist/
+stock_master.json
+stocktick.log
+watchlists.json
+whale-profile/

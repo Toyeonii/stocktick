@@ -1,4 +1,4 @@
-const CACHE_NAME = "stocktick-shell-v1";
+const CACHE_NAME = "stocktick-shell-v3";
 const SHELL_URLS = ["/", "/manifest.json", "/static/icon-192.png", "/static/icon-512.png"];
 
 self.addEventListener("install", (event) => {
