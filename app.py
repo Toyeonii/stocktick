@@ -23,7 +23,23 @@ if FROZEN and (sys.stdout is None or sys.stderr is None):
     sys.stdout = sys.stderr = _log
     print(f"\n===== {time.strftime('%Y-%m-%d %H:%M:%S')} StockTick 시작 =====", flush=True)
 
-PORT = 5000
+# .env는 포트 설정에도 쓰이므로 가장 먼저 읽음
+from dotenv import load_dotenv
+load_dotenv(app_path(".env"))  # exe(또는 app.py) 옆의 .env에서 KIS 키, 포트 등 로드
+
+
+def _port_from_env():
+    """STOCKTICK_PORT로 포트 변경 (맥은 AirPlay 수신 모드가 5000번을 씀)"""
+    raw = os.environ.get("STOCKTICK_PORT", "").strip()
+    if not raw:
+        return 5000
+    if raw.isdigit() and 1024 <= int(raw) <= 65535:
+        return int(raw)
+    print(f"STOCKTICK_PORT 값({raw})이 올바르지 않아 5000번을 씁니다. 1024~65535 사이 숫자로 지정해 주세요.", flush=True)
+    return 5000
+
+
+PORT = _port_from_env()
 # 실행 파일: 앱 창에서 요청이 이 시간(초) 동안 없으면 서버 종료 (= 앱 창을 닫으면 잠시 뒤 꺼짐)
 IDLE_EXIT_SEC = int(os.environ.get("STOCKTICK_IDLE_EXIT_SEC", "180"))
 APP_URL = f"http://localhost:{PORT}"
@@ -92,7 +108,9 @@ def _exit_if_already_running(port):
         time.sleep(3)   # 메시지를 읽을 시간
         sys.exit(0)
     print(f"다른 프로그램이 {port}번 포트를 쓰고 있어서 StockTick 서버를 시작할 수 없어요.", flush=True)
-    print("그 프로그램을 종료한 뒤 다시 실행해 주세요.", flush=True)
+    print("그 프로그램을 종료하거나, .env에 STOCKTICK_PORT=5050 처럼 다른 포트를 지정한 뒤 다시 실행해 주세요.", flush=True)
+    if sys.platform == "darwin" and port == 5000:
+        print("(맥이라면 시스템 설정 > 일반 > AirDrop 및 Handoff > 'AirPlay 수신 모드'가 5000번을 쓰고 있을 수 있어요.)", flush=True)
     time.sleep(15)
     sys.exit(1)
 
@@ -101,9 +119,6 @@ if __name__ == "__main__":
     _exit_if_already_running(PORT)
 
 from flask import Flask, jsonify, request, Response
-from dotenv import load_dotenv
-
-load_dotenv(app_path(".env"))  # exe(또는 app.py) 옆의 .env에서 KIS_APP_KEY / KIS_APP_SECRET 로드
 
 import kis_client
 

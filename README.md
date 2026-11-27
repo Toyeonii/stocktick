@@ -1,4 +1,30 @@
-# StockTick — 광고 없는 관심종목 실시간 시세 (한국투자증권 Open API)
+# StockTick
+
+> **2026-11 로컬 버전 요약** (아래 원래 README보다 이 부분이 최신입니다)
+>
+> **처음 설정**
+> 1. `pip install -r requirements.txt`
+> 2. `.env.example`을 복사해 `.env`로 만들고 KIS 앱키·시크릿 입력
+>
+> **실행**
+> - 개발용: `run_stocktick.bat` 더블클릭 (서버 창 + 웨일 앱 창). Python 경로가 다르면 bat 안의 `PY=` 수정
+> - 배포용: `build_release.bat` → `.release\StockTick.exe` (창 없이 실행, 앱 창 닫으면 3분 뒤 자동 종료, 로그는 `stocktick.log`)
+>
+> **주요 기능**: 관심종목 그룹(서버 `watchlists.json`에 저장) · 실시간 시세 · 캔들차트(기간·일/주/월·이동평균 5/20/60/120)
+> · 시세/투자정보 · 투자자 매매동향(KRX+NXT 통합, 무한 스크롤, 5/20/60일 누적, 보유율 추정) · 일별 시세(무한 스크롤)
+> · NXT 프리/애프터마켓 가격 · 동시호가 예상체결가 · 코스피/코스닥·미국 지수(마우스 올리면 상세, 누르면 차트)
+>
+> **맥에서 실행**: `pip3 install -r requirements.txt` → `python3 app.py` → 브라우저에서 `http://localhost:5050`.
+> 맥은 AirPlay 수신 모드가 5000번 포트를 쓰므로 `.env`에 `STOCKTICK_PORT=5050` 추가 (배치 파일·exe는 Windows 전용)
+>
+> **확인용 주소**: `/api/kis-status`, `/api/history-debug`, `/api/investor-debug`, `/api/investor-daily-debug`,
+> `/api/nxt-debug`, `/api/expected-debug`, `/api/kr-index-debug`, `/api/us-index-debug`, `/api/master-status`
+>
+> **알아둘 제약**: 날짜 지정 매매동향 API는 00:00~15:40 조회 불가(그 시간엔 최근 30거래일만) ·
+> 접근 토큰 발급은 1분 1회 제한(토큰을 `.kis_token.json`에 저장해 재사용) · 회사망에서는 KIS 포트(9443, 21000)가 막힐 수 있음
+
+---
+
 
 증권통 같은 앱의 광고 없이, 관심종목만 깔끔하게 보고 싶어서 만든 초경량 웹앱.
 한국투자증권 KIS Developers 웹소켓으로 실시간 체결가를 직접 받아옵니다 (비공식 스크래핑 없음).
