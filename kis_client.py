@@ -142,8 +142,96 @@ def ensure_subscribed(code):
     _pending_queue.put(code)
 
 
-_rest_session = requests.Session()
-_rest_session.trust_env = False
+# 백그라운드 갱신(관심종목 시세·지수)에서 나가는 요청이면 True. 화면에서 누른 요청보다 뒤로 미룸
+_bg = threading.local()
+
+
+def set_background(flag):
+    _bg.on = bool(flag)
+
+
+class _ThrottledSession(requests.Session):
+    """KIS REST 호출 속도 조절 + 한도 초과 시 재시도.
+    KIS는 초당 호출 수를 넘으면 HTTP 500 + "초당 거래건수를 초과하였습니다"(EGW00201)로 응답함.
+    - 모든 요청을 일정 간격으로 보냄. 화면에서 누른 요청(차트·종목 정보 등)이 백그라운드 갱신보다 먼저
+    - 한도 초과를 받으면 간격을 늘리고(최대 0.5초), 성공이 이어지면 빠르게 원래 속도로 돌아옴"""
+
+    MAX_INTERVAL = 0.5
+
+    def __init__(self, rps):
+        super().__init__()
+        self.trust_env = False
+        self._base = 1.0 / max(1.0, rps)
+        self._interval = self._base
+        self._cond = threading.Condition()
+        self._next = 0.0
+        self._fg_waiting = 0      # 차례를 기다리는 화면 요청 수
+        self._slow_logged = False
+        self._last_log = 0.0       # 속도 변경 기록은 1분에 한 번만
+
+    def _wait_turn(self):
+        fg = not getattr(_bg, "on", False)
+        with self._cond:
+            if fg:
+                self._fg_waiting += 1
+            else:
+                # 화면 요청이 기다리는 중이면 양보
+                while self._fg_waiting > 0:
+                    self._cond.wait(timeout=0.2)
+            now = time.monotonic()
+            wait = self._next - now
+            self._next = max(now, self._next) + self._interval
+        if wait > 0:
+            time.sleep(wait)
+        if fg:
+            with self._cond:
+                self._fg_waiting -= 1
+                self._cond.notify_all()
+
+    def _on_limited(self):
+        with self._cond:
+            self._interval = min(self.MAX_INTERVAL, self._interval * 2)
+            self._next = max(self._next, time.monotonic() + 0.3)
+            if not self._slow_logged and time.monotonic() - self._last_log > 60:
+                self._slow_logged = True
+                self._last_log = time.monotonic()
+                print(f"[KIS REST] 초당 호출 한도 초과 -> 잠시 호출 간격을 늘려요 ({self._interval:.2f}초)", flush=True)
+
+    def _on_ok(self):
+        with self._cond:
+            self._interval = max(self._base, self._interval * 0.7)
+            if self._slow_logged and self._interval <= self._base:
+                self._slow_logged = False   # 되돌린 건 따로 기록하지 않음 (기록이 너무 잦아서)
+
+    @staticmethod
+    def _rate_limited(resp):
+        if resp.status_code not in (200, 500):
+            return False
+        t = resp.text[:300]
+        return "EGW00201" in t or "초당 거래건수" in t
+
+    def request(self, method, url, *args, **kwargs):
+        for attempt in range(5):
+            self._wait_turn()
+            resp = super().request(method, url, *args, **kwargs)
+            if not self._rate_limited(resp):
+                self._on_ok()
+                break
+            self._on_limited()
+        if resp.status_code >= 400 and not self._rate_limited(resp):
+            # raise_for_status()는 URL만 남기므로 KIS가 보낸 실제 메시지를 함께 기록
+            # (한도 초과는 위에서 따로 한 줄로 알리므로 제외)
+            path = url.split("?")[0].rsplit("/", 1)[-1]
+            print(f"[KIS REST] HTTP {resp.status_code} ({path}): {resp.text[:160]}", flush=True)
+        return resp
+
+
+# 초당 호출 수 (KIS 실전 한도보다 넉넉히 낮게). .env의 KIS_RPS로 조정 가능
+try:
+    KIS_RPS = float(os.environ.get("KIS_RPS", "10"))
+except ValueError:
+    KIS_RPS = 10.0
+_rest_session = _ThrottledSession(KIS_RPS)
 
 _access_token_lock = threading.Lock()
 _access_token = {"token": None, "expires_at": 0}

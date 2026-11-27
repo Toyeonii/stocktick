@@ -125,10 +125,15 @@ import kis_client
 app = Flask(__name__, static_folder=res_path("static"))
 
 
+# 2초·10초·1분마다 자동으로 오는 갱신 요청. KIS 호출 순서에서 화면 요청(차트·종목 정보 등)보다 뒤로 미룸
+_BACKGROUND_PATHS = ("/api/quotes", "/api/kr-indices", "/api/us-indices")
+
+
 @app.before_request
 def _mark_request():
     global _last_request
     _last_request = time.time()
+    kis_client.set_background(request.path in _BACKGROUND_PATHS)
 
 import stock_master
 
@@ -517,6 +522,51 @@ def us_index_debug():
             except Exception as e:
                 out[name][c] = {"error": f"{type(e).__name__}: {e}"}
             time.sleep(0.1)   # REST 초당 호출 제한 여유
+    return jsonify(out)
+
+
+@app.route("/api/rate-test")
+def rate_test():
+    """[확인용] 지금 앱키의 실제 초당 호출 한도와 응답 속도 측정.
+    삼성전자 현재가 조회를 초당 2/5/10/20건 속도로 10번씩 보냄 (속도 조절 없이 직접). 약 15초 걸림"""
+    import requests as _rq
+    sess = _rq.Session()
+    sess.trust_env = False
+    token = kis_client._get_access_token()
+    headers = {"authorization": f"Bearer {token}", "appkey": kis_client.APP_KEY, "appsecret": kis_client.APP_SECRET,
+               "tr_id": "FHKST01010100", "custtype": "P"}
+    url = f"{kis_client.REST_BASE}/uapi/domestic-stock/v1/quotations/inquire-price"
+    params = {"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": "005930"}
+    out = {"앱키_앞자리": kis_client.APP_KEY[:4] + "...", "측정시각": time.strftime("%H:%M:%S")}
+    for rps in (2, 5, 10, 20):
+        ok = limited = other = 0
+        lat = []
+        other_msgs = set()
+        for _ in range(10):
+            t0 = time.monotonic()
+            try:
+                r = sess.get(url, headers=headers, params=params, timeout=5)
+                lat.append(time.monotonic() - t0)
+                # rt_cd는 응답 끝에 있으므로 JSON으로 읽어서 판정
+                try:
+                    j = r.json()
+                except ValueError:
+                    j = {}
+                if "EGW00201" in r.text or "초당 거래건수" in r.text:
+                    limited += 1
+                elif r.status_code == 200 and j.get("rt_cd") == "0":
+                    ok += 1
+                else:
+                    other += 1
+                    other_msgs.add(f"HTTP {r.status_code} [{j.get('msg_cd')}] {j.get('msg1') or r.text[:60]}")
+            except Exception as e:
+                other += 1
+                other_msgs.add(f"{type(e).__name__}")
+            time.sleep(max(0.0, 1.0 / rps - (time.monotonic() - t0)))
+        out[f"초당 {rps}건"] = {"성공": ok, "한도초과": limited, "기타오류": other,
+                              "평균응답(초)": round(sum(lat) / len(lat), 3) if lat else None,
+                              **({"기타오류내용": sorted(other_msgs)[:3]} if other_msgs else {})}
+        time.sleep(1.5)   # 다음 측정 전에 한도 회복
     return jsonify(out)
 
 
