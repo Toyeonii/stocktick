@@ -1,9 +1,13 @@
 @echo off
 cd /d "%~dp0"
-set PY=C:\Users\yongju.lee\AppData\Local\Programs\Python\Python312\python.exe
+set PY=C:\Users\yeonj\AppData\Local\Programs\Python\Python312\python.exe
+if not exist "%PY%" set PY=python
 set WHALE=C:\Program Files\Naver\Naver Whale\Application\whale.exe
-set PROFILE=%~dp0whale-profile
 
-start "StockTick 서버" "%PY%" app.py
+start "StockTick server" "%PY%" app.py
 timeout /t 3 >nul
-start "" "%WHALE%" --app=http://localhost:5000 --window-size=1536,1112 --user-data-dir="%PROFILE%"
+if exist "%WHALE%" (
+  start "" "%WHALE%" --app=http://localhost:5000 --window-size=1536,1112 --user-data-dir="%~dp0whale-profile"
+) else (
+  start "" http://localhost:5000
+)

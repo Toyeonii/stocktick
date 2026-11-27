@@ -33,7 +33,15 @@ QUOTE_CACHE = {}
 _cache_lock = threading.Lock()
 
 _subscribed_codes = set()
-_pending_queue = queue.Queue()
+_pending_queue = queue.Queue()     # 구독할 종목코드, 또는 ("unsub", 종목코드)
+
+# 실시간 구독 개수 한도 처리 (KIS가 OPSP0008 MAX SUBSCRIBE OVER로 거절하면 그 개수를 한도로 기억)
+_sub_lock = threading.Lock()
+_sub_ok = []                # 구독 성공한 종목 (오래된 순)
+_sub_cap = None             # 알아낸 구독 한도 (모르면 None)
+_blocked_until = {}         # 한도 초과로 거절된 종목 -> 다시 신청해 볼 시각
+_priority_code = None       # 상세 화면에서 보고 있는 종목 (한도가 차도 이 종목은 구독)
+BLOCK_SEC = 300
 _ws_ready = threading.Event()
 _approval_key = None
 
@@ -45,7 +53,48 @@ _status = {
     "connected_at": None,
     "loop_count": 0,              # recv 루프가 몇 번 돌았는지 (스레드 생존 확인용)
     "last_loop_at": None,
+    "sub_results": {},            # 종목별 마지막 구독 응답 (KIS가 보낸 메시지)
 }
+
+
+def _handle_control(msg):
+    """웹소켓 제어 메시지 처리. 구독 응답이면 결과를 기록하고,
+    실패한 종목은 구독 목록에서 빼서 다음 시세 조회 때 다시 신청되게 함.
+    반환: 처리한 종목코드(구독 응답이 아니면 None)"""
+    header = msg.get("header") or {}
+    if header.get("tr_id") != "H0STCNT0":
+        return None
+    code = header.get("tr_key")
+    body = msg.get("body") or {}
+    rt_cd, msg1 = body.get("rt_cd"), (body.get("msg1") or "").strip()
+    if not code or rt_cd is None:
+        return None
+    global _sub_cap
+    _status["sub_results"][code] = f"{msg1} ({_now()[11:]})"
+    upper = msg1.upper()
+    if "UNSUB" in upper:
+        return code                       # 해지 응답
+    if rt_cd == "0":
+        with _sub_lock:
+            if code not in _sub_ok:
+                _sub_ok.append(code)
+        return code
+    if "ALREADY" in upper:
+        return code
+    _subscribed_codes.discard(code)
+    if body.get("msg_cd") == "OPSP0008" or "MAX SUBSCRIBE" in upper:
+        # 구독 개수 한도: 그 개수를 기억하고, 이 종목은 한동안 다시 신청하지 않음 (REST 조회로 대체)
+        with _sub_lock:
+            first = _sub_cap is None
+            _sub_cap = max(1, len(_sub_ok))
+            _blocked_until[code] = time.monotonic() + BLOCK_SEC
+        _status["sub_cap"] = _sub_cap
+        if first:
+            print(f"[KIS WS] 실시간 구독은 {_sub_cap}개까지만 허용돼요 (OPSP0008 MAX SUBSCRIBE OVER). "
+                  f"나머지 종목은 20초마다 조회로 갱신하고, 상세 화면에서 보는 종목은 우선 구독해요.", flush=True)
+        return code
+    print(f"[KIS WS] 구독 실패 {code}: [{body.get('msg_cd')}] {msg1} -> 잠시 뒤 다시 신청해요", flush=True)
+    return code
 
 
 def _now():
@@ -53,7 +102,9 @@ def _now():
 
 
 def get_status():
-    return {**_status, "ws_ready": _ws_ready.is_set(), "subscribed_codes": list(_subscribed_codes)}
+    return {**_status, "ws_ready": _ws_ready.is_set(), "subscribed_codes": list(_subscribed_codes),
+            "sub_cap": _sub_cap, "priority_code": _priority_code,
+            "blocked": sorted(c for c, t in _blocked_until.items() if t > time.monotonic())}
 
 
 _http_session = requests.Session()
@@ -134,12 +185,33 @@ def _parse_tick(raw_fields):
 
 
 def ensure_subscribed(code):
-    """아직 구독 안 한 종목코드면 구독 큐에 넣음 (백그라운드 스레드가 실제 전송)"""
+    """아직 구독 안 한 종목코드면 구독 큐에 넣음 (백그라운드 스레드가 실제 전송).
+    구독 한도에 걸린 상태면 신청하지 않음 (그 종목은 REST 조회로 갱신됨)"""
     if code in _subscribed_codes:
         return
-    if len(_subscribed_codes) >= MAX_SUBSCRIPTIONS:
-        return  # 정책 한도 초과 시 조용히 무시 (필요하면 여기서 에러 표시 가능)
+    if _blocked_until.get(code, 0) > time.monotonic():
+        return
+    cap = _sub_cap or MAX_SUBSCRIPTIONS
+    if len(_subscribed_codes) >= cap:
+        return
     _pending_queue.put(code)
+
+
+def set_priority(code):
+    """상세 화면에서 보는 종목은 구독 한도가 차 있어도 실시간으로 받도록,
+    가장 오래된 다른 구독 하나를 해지하고 이 종목을 구독함"""
+    global _priority_code
+    _priority_code = code
+    if code in _subscribed_codes:
+        return
+    _blocked_until.pop(code, None)
+    cap = _sub_cap or MAX_SUBSCRIPTIONS
+    with _sub_lock:
+        victims = [c for c in _sub_ok if c != code]
+        full = len(_subscribed_codes) >= cap
+    if full and victims:
+        _pending_queue.put(("unsub", victims[0]))
+    _pending_queue.put(("prio", code))
 
 
 # 백그라운드 갱신(관심종목 시세·지수)에서 나가는 요청이면 True. 화면에서 누른 요청보다 뒤로 미룸
@@ -1073,6 +1145,12 @@ def _run_forever():
             fails = 0
             ws.settimeout(1.0)
             _subscribed_codes.clear()
+            with _sub_lock:
+                _sub_ok.clear()
+            _blocked_until.clear()
+            if _priority_code:
+                _pending_queue.put(("prio", _priority_code))   # 재연결하면 보던 종목부터
+            last_sub_at = 0.0   # 마지막 구독 신청 시각 (간격 조절용)
             _ws_ready.set()
             _status["phase"] = "looping"
             _status["connected_at"] = _now()
@@ -1080,15 +1158,35 @@ def _run_forever():
             while True:
                 _status["loop_count"] += 1
                 _status["last_loop_at"] = _now()
-                # 큐에 쌓인 신규 구독 요청 처리
-                while not _pending_queue.empty():
-                    code = _pending_queue.get()
+                # 큐에 쌓인 신규 구독 요청 처리.
+                # 한꺼번에 보내면 KIS가 일부를 거절하므로 KIS_RPS에 맞춰 한 번에 하나씩 간격을 둠
+                sub_gap = max(0.05, 1.0 / max(1.0, KIS_RPS))
+                while not _pending_queue.empty() and time.monotonic() - last_sub_at >= sub_gap:
+                    item = _pending_queue.get()
+                    if isinstance(item, tuple) and item[0] == "unsub":
+                        code = item[1]
+                        if code not in _subscribed_codes:
+                            continue
+                        ws.send(_subscribe_frame(_approval_key, code, tr_type="2"))
+                        _subscribed_codes.discard(code)
+                        with _sub_lock:
+                            if code in _sub_ok:
+                                _sub_ok.remove(code)
+                        _blocked_until[code] = time.monotonic() + BLOCK_SEC
+                        with _cache_lock:
+                            QUOTE_CACHE.pop(code, None)   # 멈춘 실시간 값 대신 REST 조회로 넘어가게
+                        last_sub_at = time.monotonic()
+                        print(f"[KIS WS] 구독 해지: {code} (구독 한도 때문에 보고 있는 종목에 자리 양보)", flush=True)
+                        continue
+                    code = item[1] if isinstance(item, tuple) else item
                     if code in _subscribed_codes:
                         continue
+                    if not isinstance(item, tuple) and len(_subscribed_codes) >= (_sub_cap or MAX_SUBSCRIPTIONS):
+                        continue   # 큐에 들어간 사이 한도가 찼으면 건너뜀
                     ws.send(_subscribe_frame(_approval_key, code))
                     _subscribed_codes.add(code)
-                    print(f"[KIS WS] 구독 등록: {code}", flush=True)
-                    time.sleep(0.05)  # 과도한 연속 전송 방지
+                    last_sub_at = time.monotonic()
+                    print(f"[KIS WS] 구독 신청: {code}", flush=True)
 
                 try:
                     data = ws.recv()
@@ -1113,11 +1211,13 @@ def _run_forever():
                         with _cache_lock:
                             QUOTE_CACHE[tick["code"]] = tick
                 else:
-                    # PINGPONG 등 제어 메시지
+                    # PINGPONG, 구독 응답 등 제어 메시지
                     try:
                         msg = json.loads(data)
                         if msg.get("header", {}).get("tr_id") == "PINGPONG":
                             ws.send(data)  # 그대로 되돌려줘야 연결 유지됨
+                        else:
+                            _handle_control(msg)
                     except json.JSONDecodeError:
                         pass
 

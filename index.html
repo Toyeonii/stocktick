@@ -253,8 +253,8 @@
   .d-quote { display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px 12px; margin: 14px 0 18px; }
   .d-price { font-size: 36px; font-weight: 800; letter-spacing: -0.03em; line-height: 1; }
   .pill.big { font-size: 13.5px; padding: 4px 9px; border-radius: 8px; }
-  .d-quote:has(+ .nxt-line:not([hidden])), .d-quote:has(+ .nxt-line[hidden] + .nxt-line:not([hidden])) { margin-bottom: 6px; }
-  .nxt-line + .nxt-line:not([hidden]) { margin-top: -10px; }
+  .d-quote:has(+ .nxt-line:not([hidden])), .d-quote:has(+ .nxt-line[hidden] + .nxt-line:not([hidden])) { margin-bottom: 14px; }   /* 큰 가격의 쉼표 아랫부분과 겹치지 않게 */
+  .nxt-line:not([hidden]) + .nxt-line:not([hidden]) { margin-top: -8px; }   /* 두 줄이 모두 보일 때만 붙임 */
   .nxt-tag.exp { background: var(--gold); }
   .vi-tag { font-size: 11px; font-weight: 800; color: var(--up); border: 1px solid var(--up); border-radius: 4px; padding: 0 5px; }
   .nxt-line { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 8px; margin: 0 0 16px; font-size: 13px; color: var(--dim); }
@@ -846,10 +846,18 @@ $("list").addEventListener("keydown", e => {
   if (row && e.target === row && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); openChart(row.dataset.code); }
 });
 
+// 실시간 체결이 아닌 값 표시: KRX가 열려 있는 시간(평일 09:00~20:00, 애프터마켓 포함)에는 '지연'(20초마다 조회), 그 밖에는 '종가'
+function staleTag() {
+  const now = getKST(), min = now.getHours() * 60 + now.getMinutes();
+  const open = now.getDay() >= 1 && now.getDay() <= 5 && min >= 540 && min < 1200;
+  return open
+    ? `<span class="tag-close" title="실시간 구독 한도 때문에 20초마다 조회한 값이에요">지연</span>`
+    : `<span class="tag-close">종가</span>`;
+}
 function applyQuoteToRow(q, animate) {
   const priceEl = $(`price-${q.code}`), chEl = $(`change-${q.code}`), row = $(`row-${q.code}`);
   if (!priceEl || q.price === null || q.price === undefined) return;
-  priceEl.innerHTML = fmtNum(q.price) + (q.live === false ? `<span class="tag-close">종가</span>` : "");
+  priceEl.innerHTML = fmtNum(q.price) + (q.live === false ? staleTag() : "");
   chEl.className = `pill ${dirOf(q.change)} num`;
   chEl.textContent = fmtRate(q.rate);
   const prev = lastPrices[q.code];
@@ -1176,7 +1184,7 @@ function renderDetailQuote(q) {
     ["iBase", "iOpen", "iHigh", "iLow", "iVol", "iAmt"].forEach(id => setKV(id, "-"));
     return;
   }
-  priceEl.innerHTML = fmtNum(q.price) + (q.live === false ? `<span class="tag-close">종가</span>` : "");
+  priceEl.innerHTML = fmtNum(q.price) + (q.live === false ? staleTag() : "");
   const d = dirOf(q.change);
   chEl.className = `pill big ${d} num`;
   chEl.textContent = `${d === "up" ? "▲ " : d === "down" ? "▼ " : ""}${fmtNum(Math.abs(q.change))}　${fmtRate(q.rate)}`;

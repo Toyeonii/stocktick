@@ -262,6 +262,7 @@ def stock_info():
     code = request.args.get("code", "").strip().upper()
     if not re.fullmatch(r"[0-9A-Z]{6}", code):
         return jsonify({"error": "종목코드는 6자리여야 해요."}), 400
+    kis_client.set_priority(code)   # 상세 화면에서 보는 종목은 실시간 구독 우선
     try:
         return jsonify(kis_client.get_stock_info(code))
     except Exception as e:
