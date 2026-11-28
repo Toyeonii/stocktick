@@ -48,7 +48,10 @@ APP_URL = f"http://localhost:{PORT}"
 def open_app_window():
     """실행 파일로 켰을 때 앱 창 띄우기 (배치 파일이 하던 일).
     웨일 -> 엣지 순서로 --app 창을 띄우고, 둘 다 없으면 기본 브라우저로 엶"""
-    size = os.environ.get("STOCKTICK_WINDOW_SIZE", "1536,1112")
+    # 기본은 최대화: 작업 표시줄을 뺀 화면을 꽉 채움 (해상도·배율이 달라도 겹치지 않음)
+    # .env에 STOCKTICK_WINDOW_SIZE=1536,1112 처럼 지정하면 그 크기로 엶
+    size = os.environ.get("STOCKTICK_WINDOW_SIZE", "").strip()
+    window_opt = f"--window-size={size}" if size else "--start-maximized"
     candidates = [
         os.environ.get("STOCKTICK_BROWSER", ""),
         r"C:\Program Files\Naver\Naver Whale\Application\whale.exe",
@@ -58,7 +61,7 @@ def open_app_window():
     ]
     for exe in candidates:
         if exe and os.path.exists(exe):
-            subprocess.Popen([exe, f"--app={APP_URL}", f"--window-size={size}",
+            subprocess.Popen([exe, f"--app={APP_URL}", window_opt,
                               f"--user-data-dir={app_path('whale-profile')}"])
             return
     webbrowser.open(APP_URL)

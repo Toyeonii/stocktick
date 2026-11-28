@@ -248,7 +248,38 @@
 
   .d-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
   .d-head h2 { margin: 0; font-size: 20px; font-weight: 800; letter-spacing: -0.02em; }
-  .d-close {
+  .d-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+  .d-print {
+    display: inline-flex; align-items: center; gap: 6px; cursor: pointer;
+    background: var(--raised); border: none; color: var(--dim); border-radius: 10px;
+    padding: 7px 12px; font-size: 12.5px; font-weight: 700;
+  }
+  .d-print:hover { color: var(--text); }
+
+  /* ---------- 인쇄 ---------- */
+  #printArea { display: none; }
+  @media print {
+    @page { size: A4 portrait; margin: 12mm; }
+    html, body { background: #fff !important; height: auto !important; overflow: visible !important; display: block !important; }
+    body > *:not(#printArea) { display: none !important; }
+    #printArea { display: block !important; color: #111; font-family: var(--font); -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  }
+  .pa-head { display: flex; justify-content: space-between; align-items: flex-end; border-bottom: 2px solid #111; padding-bottom: 8px; margin-bottom: 10px; }
+  .pa-head h1 { margin: 0; font-size: 22px; }
+  .pa-head .sub { font-size: 11px; color: #555; margin-top: 3px; }
+  .pa-head .px { text-align: right; }
+  .pa-head .px b { font-size: 24px; }
+  .pa-head .px .chg { font-size: 13px; font-weight: 700; margin-left: 6px; }
+  .pa-meta { font-size: 11px; color: #444; margin-bottom: 6px; }
+  .pa-chart { width: 100%; border: 1px solid #ddd; }
+  .pa-legend { font-size: 10.5px; color: #333; margin: 6px 0 12px; line-height: 1.6; }
+  .pa-tables { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+  .pa-tables h3 { font-size: 13px; margin: 0 0 4px; }
+  .pa-tables table { width: 100%; border-collapse: collapse; font-size: 11.5px; }
+  .pa-tables td { padding: 4px 2px; border-bottom: 1px solid #e3e3e3; }
+  .pa-tables td:last-child { text-align: right; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .pa-up { color: #d32f2f; } .pa-down { color: #1565c0; }
+  .pa-foot { margin-top: 14px; font-size: 9.5px; color: #777; border-top: 1px solid #ddd; padding-top: 6px; }
     background: var(--raised); border: none; color: var(--dim); cursor: pointer;
     width: 32px; height: 32px; border-radius: 10px; font-size: 20px; line-height: 1; flex-shrink: 0;
   }
@@ -501,7 +532,13 @@
           <h2 id="dName">-</h2>
           <div class="d-code num" id="dCode"></div>
         </div>
-        <button class="d-close" onclick="closeChart()" aria-label="차트 닫기">×</button>
+        <div class="d-actions">
+          <button class="d-print" id="printBtn" title="차트와 시세·투자정보를 A4 한 장으로 인쇄 (PDF로 저장도 가능)">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9V2h12v7"/><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect x="6" y="14" width="12" height="8"/></svg>
+            인쇄
+          </button>
+          <button class="d-close" onclick="closeChart()" aria-label="차트 닫기">×</button>
+        </div>
       </div>
 
       <div class="d-quote">
@@ -644,6 +681,7 @@
 
 <div class="size-toast num" id="sizeToast" role="status" hidden></div>
 <div class="idx-tip num" id="idxTip" hidden></div>
+<div id="printArea" aria-hidden="true"></div>
 
 <script>
 const STORAGE_KEY = "stocktick_watchlist";
@@ -2037,6 +2075,86 @@ async function loadQqq() {
 }
 loadQqq();
 setInterval(loadQqq, 60000);
+
+// ---------- 인쇄 (A4 한 장: 차트 + 시세·투자정보) ----------
+const nextFrame = () => new Promise(r => requestAnimationFrame(() => r()));
+async function captureChartForPrint() {
+  // 흰 배경으로 잠시 바꾸고 인쇄용 크기로 다시 그린 뒤 캡처, 끝나면 원래대로
+  const dark = {
+    layout: { background: { type: "solid", color: "transparent" }, textColor: C.text },
+    grid: { vertLines: { color: C.grid }, horzLines: { color: C.grid } },
+    rightPriceScale: { borderColor: C.border }, timeScale: { borderColor: C.border },
+  };
+  chart.applyOptions({
+    autoSize: false,
+    layout: { background: { type: "solid", color: "#ffffff" }, textColor: "#333333" },
+    grid: { vertLines: { color: "#eeeeee" }, horzLines: { color: "#eeeeee" } },
+    rightPriceScale: { borderColor: "#cccccc" }, timeScale: { borderColor: "#cccccc" },
+  });
+  chart.resize(1100, 680);
+  await nextFrame(); await nextFrame();
+  const url = chart.takeScreenshot().toDataURL("image/png");
+  chart.applyOptions({ ...dark, autoSize: true });
+  return url;
+}
+function kvRows(ids) {
+  return ids.map(([label, id]) => {
+    const el = $(id);
+    const cls = el?.classList.contains("up") ? "pa-up" : el?.classList.contains("down") ? "pa-down" : "";
+    return `<tr><td>${label}</td><td class="${cls}">${esc(el ? el.textContent : "-")}</td></tr>`;
+  }).join("");
+}
+// 인쇄용 범례: 마지막 봉의 시고저종·거래량과 이동평균 값 (화면 글자가 아니라 데이터로 직접)
+function legendForPrint() {
+  const b = chartState.bars.at(-1);
+  if (!b) return "";
+  const n = v => esc(chartNum(v));
+  const line1 = `${esc(b.time)} 기준　시가 ${n(b.open)} · 고가 ${n(b.high)} · 저가 ${n(b.low)} · 종가 ${n(b.close)} · 거래량 ${esc(fmtNum(b.volume))}`;
+  const mas = MA_DEFS.filter(d => maOn.includes(d.n)).map(d => {
+    const v = maValues[d.n]?.get(b.time);
+    return `<span style="color:${d.color}">■</span> ${d.n}일 ${v === undefined ? "-" : n(chartState.kind === "index" ? v : Math.round(v))}`;
+  });
+  return line1 + (mas.length ? `<br>이동평균　${mas.join("　")}` : "");
+}
+async function printChart() {
+  if (!chartState || !chart) return;
+  const isIndex = chartState.kind === "index";
+  const img = await captureChartForPrint();
+  const chEl = $("dChange");
+  const chCls = chEl.classList.contains("up") ? "pa-up" : chEl.classList.contains("down") ? "pa-down" : "";
+  const periodName = { D: "일봉", W: "주봉", M: "월봉" }[chartState.period] || "";
+  const maText = MA_DEFS.filter(d => maOn.includes(d.n)).map(d => d.n).join("/") || "없음";
+  const now = getKST(), p2 = n => String(n).padStart(2, "0");
+  const stamp = `${now.getFullYear()}-${p2(now.getMonth() + 1)}-${p2(now.getDate())} ${p2(now.getHours())}:${p2(now.getMinutes())}`;
+  const priceText = $("dPrice").childNodes[0]?.textContent || $("dPrice").textContent;
+  let tables = "";
+  if (!isIndex) {
+    tables = `<div class="pa-tables">
+      <div><h3>시세정보</h3><table>
+        <tr><td>52주 최저 / 최고</td><td>${esc($("w52Low").textContent)} / ${esc($("w52High").textContent)}</td></tr>
+        ${kvRows([["기준가", "iBase"], ["시가", "iOpen"], ["고가", "iHigh"], ["저가", "iLow"], ["거래량", "iVol"], ["거래대금", "iAmt"]])}
+      </table></div>
+      <div><h3>투자정보</h3><table>
+        ${kvRows([["시가총액", "iCap"], ["외국인 소진율", "iFrgn"], ["PER", "iPer"], ["EPS", "iEps"], ["PBR", "iPbr"], ["BPS", "iBps"]])}
+      </table></div>
+    </div>`;
+  }
+  $("printArea").innerHTML = `
+    <div class="pa-head">
+      <div><h1>${esc($("dName").textContent)}</h1><div class="sub">${esc($("dCode").innerText.replace(/\s+/g, " "))}</div></div>
+      <div class="px"><b>${esc(priceText)}</b><span class="chg ${chCls}">${esc(chEl.textContent)}</span></div>
+    </div>
+    <div class="pa-meta">조회 기간 ${esc(startInput.value)} ~ ${esc(endInput.value)} · ${periodName} · 이동평균 ${maText}</div>
+    <img class="pa-chart" src="${img}" alt="차트">
+    <div class="pa-legend">${legendForPrint()}</div>
+    ${tables}
+    <div class="pa-foot">StockTick · ${stamp} 출력 · 한국투자증권 Open API 시세 기준 · 투자 참고용이며 매매 판단의 책임은 본인에게 있습니다.</div>`;
+  const imgEl = $("printArea").querySelector("img");
+  if (!imgEl.complete) await new Promise(r => { imgEl.onload = r; imgEl.onerror = r; });
+  window.print();
+}
+$("printBtn").addEventListener("click", printChart);
+window.addEventListener("afterprint", () => { $("printArea").innerHTML = ""; });
 
 // ---------- 창 크기 확인 (로고 클릭 또는 Alt+Shift+S) ----------
 let sizeTimer = null;
