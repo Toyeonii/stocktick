@@ -311,6 +311,7 @@
 
   /* clip: hidden과 달리 스크롤 영역을 만들지 않아서, 좁은 창에서도 탭·화살표의 sticky가 동작함 */
   .info-col { min-width: 0; overflow-x: clip; }
+  .col-split { display: none; }   /* 좁은 창에서는 쓰지 않음 */
   .tabs {
     position: sticky; top: 0; z-index: 3;
     display: grid; grid-template-columns: repeat(2, 1fr); gap: 2px;
@@ -326,7 +327,7 @@
   .dwrap { position: relative; }
   .dscroll { overflow-x: auto; scroll-behavior: smooth; scrollbar-width: none; }
   .dscroll::-webkit-scrollbar { display: none; }
-  .dtable { border-collapse: separate; border-spacing: 0; font-size: 12px; white-space: nowrap; }
+  .dtable { border-collapse: separate; border-spacing: 0; font-size: 12px; white-space: nowrap; min-width: 100%; }   /* 칸을 넓히면 표도 함께 늘어남 */
   .dtable th, .dtable td { padding: 8px 0 8px 10px; text-align: right; border-bottom: 1px solid var(--line); }
   .dtable th { padding-top: 7px; padding-bottom: 7px; font-weight: 600; color: var(--faint); }
   .dtable td { font-weight: 600; }
@@ -461,7 +462,20 @@
   /* 아주 넓은 창: 정보 열을 차트 오른쪽에 고정하고 차트가 높이를 꽉 채움 */
   @media (min-width: 1180px) {
     .detail-body { overflow: hidden; }
-    .d-main { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 22px; flex: 1 1 auto; min-height: 0; }
+    .d-main { display: grid; grid-template-columns: minmax(0, 1fr) var(--info-w, 300px); gap: 22px; flex: 1 1 auto; min-height: 0; position: relative; }
+    /* 차트와 오른쪽 탭 사이 경계: 끌어서 폭 조절, 더블클릭하면 기본 폭 */
+    .col-split {
+      display: block; position: absolute; top: 0; bottom: 0; width: 12px; z-index: 5;
+      right: calc(var(--info-w, 300px) - 6px); cursor: col-resize;   /* 오른쪽 칸의 왼쪽 테두리 위 */
+    }
+    .col-split::after {
+      content: ""; position: absolute; top: 0; bottom: 0; left: 50%; width: 2px; transform: translateX(-50%);
+      background: transparent; transition: background .15s;
+    }
+    .col-split:hover::after, body.col-resizing .col-split::after { background: var(--gold); }
+    body.col-resizing { cursor: col-resize; user-select: none; }
+    body.col-resizing iframe, body.col-resizing .chart-box { pointer-events: none; }
+    .detail-body.index-mode .col-split { display: none; }
     /* 차트 열은 자체 스크롤: 차트는 화면 높이에 맞춰 적당히, 아래에 시세·투자정보 */
     .chart-col { overflow-y: auto; min-height: 0; padding-right: 6px; }
     .chart-col .chart-box { height: clamp(280px, 42vh, 430px); }
@@ -625,6 +639,7 @@
           </div>
         </div>
 
+        <div class="col-split" id="colSplit" title="끌어서 폭 조절 · 더블클릭하면 기본 폭"></div>
         <aside class="info-col num">
           <div class="tabs" id="infoTabs" role="tablist">
             <button role="tab" data-tab="inv">투자자 매매동향</button>
@@ -2075,6 +2090,41 @@ async function loadQqq() {
 }
 loadQqq();
 setInterval(loadQqq, 60000);
+
+// ---------- 차트 | 오른쪽 탭 경계 끌어서 폭 조절 ----------
+(() => {
+  const split = $("colSplit"), main = document.querySelector(".d-main");
+  const KEY = "stocktick_info_w", MIN = 260, DEF = 300;
+  const clampW = w => Math.round(Math.max(MIN, Math.min(w, main.getBoundingClientRect().width * 0.5)));
+  const apply = w => main.style.setProperty("--info-w", w + "px");
+  try { const saved = Number(localStorage.getItem(KEY)); if (saved >= MIN) apply(saved); } catch (e) {}
+  let dragging = false;
+  split.addEventListener("pointerdown", e => {
+    dragging = true; split.setPointerCapture(e.pointerId);
+    document.body.classList.add("col-resizing"); e.preventDefault();
+  });
+  split.addEventListener("pointermove", e => {
+    if (!dragging) return;
+    apply(clampW(main.getBoundingClientRect().right - e.clientX));
+  });
+  const end = () => {
+    if (!dragging) return;
+    dragging = false; document.body.classList.remove("col-resizing");
+    const w = parseInt(getComputedStyle(main).getPropertyValue("--info-w")) || DEF;
+    try { localStorage.setItem(KEY, String(w)); } catch (e) {}
+  };
+  split.addEventListener("pointerup", end);
+  split.addEventListener("pointercancel", end);
+  split.addEventListener("dblclick", () => {
+    main.style.removeProperty("--info-w");
+    try { localStorage.removeItem(KEY); } catch (e) {}
+  });
+  // 창이 작아져서 저장된 폭이 절반을 넘으면 맞춰 줄임
+  addEventListener("resize", () => {
+    const cur = parseInt(main.style.getPropertyValue("--info-w"));
+    if (cur && cur !== clampW(cur)) apply(clampW(cur));
+  });
+})();
 
 // ---------- 인쇄 (A4 한 장: 차트 + 시세·투자정보) ----------
 const nextFrame = () => new Promise(r => requestAnimationFrame(() => r()));
