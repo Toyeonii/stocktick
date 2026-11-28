@@ -12,3 +12,5 @@ stocktick.log
 watchlists.json
 whale-profile/
 *.zip
+spark_cache.json
+closed_cache.json

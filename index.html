@@ -201,6 +201,7 @@
     font-size: 10px; font-weight: 600; color: var(--faint);
     border: 1px solid var(--line); border-radius: 5px; padding: 1px 4px; margin-left: 5px; vertical-align: 2px;
   }
+  .tag-close.tag-after { color: var(--gold); border-color: var(--gold); }
 
   .pill {
     display: inline-block; padding: 2px 7px; border-radius: 6px;
@@ -861,12 +862,22 @@ function nextOpenText(now) {
   const days = ["일", "월", "화", "수", "목", "금", "토"];
   return `${d.getMonth() + 1}/${d.getDate()}(${days[d.getDay()]}) 09:00 개장`;
 }
+// KRX 시간 구분: regular 정규장 09:00~15:30 / gap 15:30~16:00 / after 애프터마켓 16:00~20:00 (2026-09-14~, 접속매매, ETF·ETN 제외) / closed
+function krxSession(now = getKST()) {
+  const day = now.getDay(), min = now.getHours() * 60 + now.getMinutes();
+  if (day < 1 || day > 5) return "closed";
+  if (min >= 540 && min < 930) return "regular";
+  if (min >= 930 && min < 960) return "gap";
+  if (min >= 960 && min < 1200) return "after";
+  return "closed";
+}
 function updateMarketStatus() {
-  const now = getKST();
-  const min = now.getHours() * 60 + now.getMinutes();
-  const isOpen = now.getDay() >= 1 && now.getDay() <= 5 && min >= 540 && min < 930;
-  $("market").classList.toggle("open", isOpen);
-  $("marketText").innerHTML = isOpen ? "<b>장중</b> 15:30 마감" : `<b>장 마감</b> ${nextOpenText(now)}`;
+  const now = getKST(), ses = krxSession(now);
+  $("market").classList.toggle("open", ses === "regular" || ses === "after");
+  $("marketText").innerHTML = ses === "regular" ? "<b>장중</b> 15:30 마감"
+    : ses === "gap" ? "<b>정규장 마감</b> 애프터마켓 16:00 시작"
+    : ses === "after" ? "<b>애프터마켓</b> 20:00 마감"
+    : `<b>장 마감</b> ${nextOpenText(now)}`;
 }
 
 // ---------- 목록 ----------
@@ -907,12 +918,12 @@ $("list").addEventListener("keydown", e => {
   if (row && e.target === row && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); openChart(row.dataset.code); }
 });
 
-// 실시간 체결이 아닌 값 표시: KRX가 열려 있는 시간(평일 09:00~20:00, 애프터마켓 포함)에는 '지연'(20초마다 조회), 그 밖에는 '종가'
+// 실시간 체결이 아닌 값 표시: KRX가 열려 있는 시간(평일 09:00~20:00, 애프터마켓 포함)에는 '지연'(5초마다 조회), 그 밖에는 '종가'
 function staleTag() {
   const now = getKST(), min = now.getHours() * 60 + now.getMinutes();
   const open = now.getDay() >= 1 && now.getDay() <= 5 && min >= 540 && min < 1200;
   return open
-    ? `<span class="tag-close" title="실시간 구독 한도 때문에 20초마다 조회한 값이에요">지연</span>`
+    ? `<span class="tag-close" title="실시간 구독 한도 때문에 5초마다 조회한 값이에요">지연</span>`
     : `<span class="tag-close">종가</span>`;
 }
 function applyQuoteToRow(q, animate) {
@@ -954,21 +965,34 @@ function addStock(item) {
 }
 
 // ---------- 스파크라인 (최근 1개월 종가) ----------
-async function loadSpark(code) {
-  try {
-    const r = await fetch(`/api/history?code=${code}&start=${ymd(kstDate(1))}&end=${ymd(kstDate())}&period=D`);
-    if (!r.ok) return;
-    const d = await r.json();
-    sparkBars[code] = d.bars || [];
-    drawSpark(code);
-  } catch (e) { /* 스파크라인은 없어도 동작에 지장 없음 */ }
-}
+// 서버가 어제까지 종가를 하루 동안 파일에 저장해 둠(/api/sparks). 오늘 값은 받은 현재가로 붙임
+let sparkDate = kstDate();
+const sparkLoading = new Set();   // 받는 중인 종목 (시작할 때 여러 곳에서 동시에 불러도 한 번만 요청)
 async function loadSparks(codes) {
-  for (const c of codes) {
-    if (sparkBars[c]) continue;
-    await loadSpark(c);
-    await new Promise(r => setTimeout(r, 120)); // REST 호출 간격
+  const need = codes.filter(c => !sparkBars[c] && !sparkLoading.has(c));
+  need.forEach(c => sparkLoading.add(c));
+  for (let i = 0; i < need.length; i += 4) {     // 4개씩 나눠 받아서 받은 것부터 그림
+    const chunk = need.slice(i, i + 4);
+    try {
+      const r = await fetch(`/api/sparks?codes=${chunk.join(",")}`);
+      if (!r.ok) continue;
+      const d = await r.json();
+      chunk.forEach(c => { if (d[c]) { sparkBars[c] = d[c]; drawSpark(c); } });
+    } catch (e) { /* 스파크라인은 없어도 동작에 지장 없음 */ }
+    finally { chunk.forEach(c => sparkLoading.delete(c)); }
   }
+}
+// 오늘 KRX 시세가 있는 시간인지 (평일 09:00 이후). 그 전이나 주말에는 현재가가 전날 종가라 붙이지 않음
+function tradedToday() {
+  const now = getKST(), min = now.getHours() * 60 + now.getMinutes();
+  return now.getDay() >= 1 && now.getDay() <= 5 && min >= 540;
+}
+// 날짜가 바뀌면 어제 종가가 생기므로 다시 받음
+function refreshSparksIfNewDay() {
+  if (kstDate() === sparkDate) return;
+  sparkDate = kstDate();
+  sparkBars = {};
+  loadSparks(watchlist.map(w => w.code));
 }
 function drawSpark(code) {
   const wrap = $(`spark-${code}`);
@@ -977,7 +1001,7 @@ function drawSpark(code) {
   if (!bars || bars.length < 2) { wrap.innerHTML = ""; return; }
   const vals = bars.map(b => b.close);
   const q = lastQuotes[code], today = kstDate();
-  if (q && q.live && q.price) {
+  if (q && q.price && tradedToday()) {
     if (bars.at(-1).time === today) vals[vals.length - 1] = q.price;
     else if (bars.at(-1).time < today) vals.push(q.price);
   }
@@ -1039,8 +1063,11 @@ async function doSearch(q) {
 document.addEventListener("click", e => { if (!e.target.closest(".search-box")) searchResultsEl.classList.remove("show"); });
 
 // ---------- 시세 폴링 ----------
+let quotesBusy = false, quotesAgain = false;   // 이전 응답을 받기 전에는 다음 시세 요청을 보내지 않음 (느릴 때 요청이 쌓이지 않게)
 async function fetchQuotes() {
   if (!watchlist.length) return;
+  if (quotesBusy) { quotesAgain = true; return; }   // 그룹 전환 등은 지금 요청이 끝나면 바로 한 번 더
+  quotesBusy = true; quotesAgain = false;
   try {
     const res = await fetch(`/api/quotes?codes=${watchlist.map(w => w.code).join(",")}`);
     const data = await res.json();
@@ -1054,6 +1081,10 @@ async function fetchQuotes() {
       if (chartState && chartState.code === q.code) { renderDetailQuote(q); updateLiveBar(q); renderNxt(); }
     });
   } catch (e) { console.error("quote fetch failed", e); }
+  finally {
+    quotesBusy = false;
+    if (quotesAgain) fetchQuotes();
+  }
 }
 function startPolling() {
   if (pollTimer) clearInterval(pollTimer);
@@ -1258,7 +1289,9 @@ function renderDetailQuote(q) {
     ["iBase", "iOpen", "iHigh", "iLow", "iVol", "iAmt"].forEach(id => setKV(id, "-"));
     return;
   }
-  priceEl.innerHTML = fmtNum(q.price) + (q.live === false ? staleTag() : "");
+  const afterTag = krxSession() === "after"
+    ? `<span class="tag-close tag-after" title="KRX 애프터마켓(16:00~20:00) 체결가예요. ETF·ETN은 애프터마켓이 없어 정규장 종가 그대로예요">애프터</span>` : "";
+  priceEl.innerHTML = fmtNum(q.price) + afterTag + (q.live === false ? staleTag() : "");
   const d = dirOf(q.change);
   chEl.className = `pill big ${d} num`;
   chEl.textContent = `${d === "up" ? "▲ " : d === "down" ? "▼ " : ""}${fmtNum(Math.abs(q.change))}　${fmtRate(q.rate)}`;
@@ -1842,23 +1875,28 @@ wideMQ.addEventListener("change", e => {
   }
 });
 
-// ---------- NXT 시세 (KRX가 닫혀 있을 때만 큰 가격 아래 한 줄로) ----------
+// ---------- NXT 시세 (KRX 정규장 밖에서 큰 가격 아래 한 줄로) ----------
+// 큰 가격은 KRX 시세(애프터마켓 16:00~20:00 중에는 그 체결가)를 따르고, NXT 줄은 큰 가격과 같은 기준(전일 종가)으로 등락 표시
 let nxtTimer = null, nxtReq = 0, nxtData = null;
-// KRX 정규장(09:00~15:30)이면 null, 아니면 표시할 이름
+// KRX 정규장(09:00~15:30)이면 null, 아니면 표시할 이름과 등락 기준
+//  - 프리마켓(08:00~09:00): KRX 시세가 아직 전날 값이라 큰 가격 = 전일 종가
+//  - 15:30 이후~다음 날 08:00: 큰 가격의 전일 종가(현재가 - 전일대비)
 function nxtSession() {
   const now = getKST(), day = now.getDay(), min = now.getHours() * 60 + now.getMinutes();
   const weekday = day >= 1 && day <= 5;
   if (weekday && min >= 540 && min < 930) return null;
-  if (weekday && min >= 480 && min < 540) return { label: "프리마켓", base: "전일 종가 대비" };
-  if (weekday && min >= 930 && min < 1200) return { label: "애프터마켓", base: "정규장 종가 대비" };
-  return { label: "애프터마켓 종가", base: "정규장 종가 대비" };
+  if (weekday && min >= 480 && min < 540) return { label: "프리마켓", base: "전일 종가 대비", useChange: false };
+  if (weekday && min >= 930 && min < 1200) return { label: "애프터마켓", base: "전일 종가 대비", useChange: true };
+  return { label: "애프터마켓 종가", base: "전일 종가 대비", useChange: true };
 }
 function renderNxt() {
   const line = $("nxtLine");
   const ses = nxtSession();
   const q = chartState && lastQuotes[chartState.code];
   if (!ses || !nxtData || !nxtData.available || !q || !q.price) { line.hidden = true; return; }
-  const diff = nxtData.price - q.price, rate = diff / q.price * 100;
+  const basePrice = ses.useChange ? q.price - (q.change || 0) : q.price;
+  if (!basePrice) { line.hidden = true; return; }
+  const diff = nxtData.price - basePrice, rate = diff / basePrice * 100;
   const d = dirOf(diff);
   $("nxtLabel").textContent = ses.label;
   $("nxtPrice").textContent = fmtNum(nxtData.price);
@@ -2227,7 +2265,7 @@ window.addEventListener("resize", () => { if (!$("sizeToast").hidden) showSizeTo
 
 // ---------- 시작 ----------
 updateMarketStatus();
-setInterval(updateMarketStatus, 30000);
+setInterval(() => { updateMarketStatus(); refreshSparksIfNewDay(); }, 30000);
 renderGroups();
 renderList();
 if (isWide()) initDetail();

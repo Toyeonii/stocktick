@@ -129,7 +129,7 @@ app = Flask(__name__, static_folder=res_path("static"))
 
 
 # 2초·10초·1분마다 자동으로 오는 갱신 요청. KIS 호출 순서에서 화면 요청(차트·종목 정보 등)보다 뒤로 미룸
-_BACKGROUND_PATHS = ("/api/quotes", "/api/kr-indices", "/api/us-indices")
+_BACKGROUND_PATHS = ("/api/quotes", "/api/kr-indices", "/api/us-indices", "/api/sparks")
 
 
 @app.before_request
@@ -206,21 +206,22 @@ def quotes():
         return jsonify([])
 
     code_list = [c.strip() for c in codes.split(",") if c.strip()]
-    out = []
+    ticks = {}
     for code in code_list:
         kis_client.ensure_subscribed(code)
-        name = next((s["name"] for s in STOCK_LIST if s["code"] == code), None)
-
         tick = kis_client.get_quote(code)
         if tick:
-            out.append({**tick, "name": name})
-            continue
+            ticks[code] = tick
+    # 실시간 틱이 없는 종목은 멀티종목 시세로 한 번에 조회 (예전에는 종목마다 1번씩)
+    rest = kis_client.get_rest_quotes([c for c in code_list if c not in ticks])
 
-        rest = kis_client.get_rest_quote(code)
-        if rest:
-            out.append({**rest, "name": name})
+    out = []
+    for code in code_list:
+        name = next((s["name"] for s in STOCK_LIST if s["code"] == code), None)
+        q = ticks.get(code) or rest.get(code)
+        if q:
+            out.append({**q, "name": name})
             continue
-
         out.append({
             "code": code, "name": name, "price": None, "change": None,
             "rate": None, "open": None, "high": None, "low": None,
@@ -257,6 +258,17 @@ def history():
 
     name = data["name"] or next((s["name"] for s in STOCK_LIST if s["code"] == code), None)
     return jsonify({"code": code, "name": name, "period": period, **{k: data[k] for k in ("bars", "pages")}})
+
+
+@app.route("/api/sparks")
+def sparks():
+    """스파크라인용 최근 1개월 종가(어제까지): ?codes=005930,000660 -> {code: [{time, close}] 또는 null}
+    서버의 spark_cache.json에 하루 동안 저장해 두므로, 같은 날 다시 켜면 KIS를 부르지 않음"""
+    codes = [c.strip().upper() for c in request.args.get("codes", "").split(",") if c.strip()]
+    codes = [c for c in codes if re.fullmatch(r"[0-9A-Z]{6}", c)][:20]
+    if not codes:
+        return jsonify({})
+    return jsonify(kis_client.get_sparks(codes))
 
 
 @app.route("/api/info")
@@ -363,6 +375,68 @@ def nxt_debug():
                       "누적거래량": o.get("acml_vol"), "기준가": o.get("stck_sdpr")}
         except Exception as e:
             out[m] = {"error": f"{type(e).__name__}: {e}"}
+    return jsonify(out)
+
+
+@app.route("/api/after-debug")
+def after_debug():
+    """[확인용] KRX 애프터마켓(16:00~20:00) 중 KIS 응답 확인: KRX(J)/NXT(NX)/통합(UN) 현재가 + 실시간 틱 시각.
+    J의 현재가가 애프터마켓 체결가로 바뀌는지, 웹소켓(H0STCNT0)으로 16시 이후 틱이 오는지 보는 용도"""
+    code = request.args.get("code", "005930")
+    out = {"확인시각": time.strftime("%H:%M:%S"), "종목": code}
+    keys = {"현재가": "stck_prpr", "전일대비": "prdy_vrss", "등락률": "prdy_ctrt", "기준가": "stck_sdpr",
+            "시가": "stck_oprc", "고가": "stck_hgpr", "저가": "stck_lwpr", "누적거래량": "acml_vol",
+            "업종": "bstp_kor_isnm", "종목상태": "iscd_stat_cls_code", "임시정지": "temp_stop_yn"}
+    for m in ("J", "NX", "UN"):
+        try:
+            status, body = kis_client._fetch_price_raw(code, m)
+            o = body.get("output") or {}
+            row = {"http": status, "rt_cd": body.get("rt_cd"), "msg1": body.get("msg1")}
+            row.update({k: o.get(f) for k, f in keys.items()})
+            if m == "J":
+                row["output 전체"] = o   # 애프터마켓 전용 필드가 있는지 찾아보기 위해
+            out[m] = row
+        except Exception as e:
+            out[m] = {"error": f"{type(e).__name__}: {e}"}
+    raw = kis_client.LAST_RAW_TICK.get(code)
+    out["실시간 틱"] = ({"체결시각": raw[1], "현재가": raw[2], "전일대비": raw[4], "누적거래량": raw[13]}
+                    if raw else "이 종목 실시간 틱 없음 (구독 안 됐거나 16시 이후 틱이 안 옴)")
+    return jsonify(out)
+
+
+@app.route("/api/multi-quote-debug")
+def multi_quote_debug():
+    """[확인용] 멀티종목 시세(FHKST11300006) 응답 확인. ?codes=005930,000660 (없으면 지금 그룹의 관심종목)
+    비교용으로 첫 종목은 기존 단일 시세(FHKST01010100)도 함께 조회"""
+    codes = [c.strip().upper() for c in request.args.get("codes", "").split(",") if c.strip()]
+    if not codes:
+        try:
+            with open(WATCH_FILE, encoding="utf-8") as f:
+                d = json.load(f)
+            g = d["groups"][max(0, min(d.get("active", 0), len(d["groups"]) - 1))]
+            codes = [it["code"] for it in g["items"]]
+        except Exception:
+            codes = ["005930", "000660", "035420"]
+    codes = [c for c in codes if re.fullmatch(r"[0-9A-Z]{6}", c)][:30]
+    out = {"확인시각": time.strftime("%H:%M:%S"), "보낸 종목": codes}
+    try:
+        status, body = kis_client._fetch_multi_price_raw(codes)
+        o = body.get("output")
+        out["멀티"] = {"http": status, "rt_cd": body.get("rt_cd"), "msg_cd": body.get("msg_cd"), "msg1": body.get("msg1"),
+                     "받은 건수": len(o) if isinstance(o, list) else None,
+                     "다른 키": [k for k in body if k not in ("rt_cd", "msg_cd", "msg1", "output")],
+                     "output": o}
+    except Exception as e:
+        out["멀티"] = {"error": f"{type(e).__name__}: {e}"}
+    try:
+        status, body = kis_client._fetch_price_raw(codes[0], "J")
+        o = body.get("output") or {}
+        out["비교용 단일 시세"] = {"종목": codes[0], "현재가": o.get("stck_prpr"), "전일대비": o.get("prdy_vrss"),
+                             "등락률": o.get("prdy_ctrt"), "부호": o.get("prdy_vrss_sign"), "시가": o.get("stck_oprc"),
+                             "고가": o.get("stck_hgpr"), "저가": o.get("stck_lwpr"), "누적거래량": o.get("acml_vol"),
+                             "누적거래대금": o.get("acml_tr_pbmn")}
+    except Exception as e:
+        out["비교용 단일 시세"] = {"error": f"{type(e).__name__}: {e}"}
     return jsonify(out)
 
 
@@ -503,7 +577,9 @@ def qqq():
 def qqq_debug():
     """[확인용] QQQ(나스닥100 ETF)를 주간거래(BAQ)와 정규(NAS) 시장 코드로 조회해서 응답 비교"""
     symb = request.args.get("symb", "QQQ").upper()
-    out = {"확인시각": time.strftime("%H:%M:%S"), "종목": symb}
+    excd_now, ses_now = kis_client._qqq_session()
+    out = {"확인시각": time.strftime("%H:%M:%S"), "미국동부시각": kis_client._us_eastern_now().strftime("%a %H:%M (UTC%z)"),
+           "앱 판단": f"{ses_now} ({excd_now})", "종목": symb}
     for excd in ("BAQ", "NAS"):
         try:
             status, body = kis_client._fetch_overseas_price_raw(excd, symb)

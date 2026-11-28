@@ -91,7 +91,7 @@ def _handle_control(msg):
         _status["sub_cap"] = _sub_cap
         if first:
             print(f"[KIS WS] 실시간 구독은 {_sub_cap}개까지만 허용돼요 (OPSP0008 MAX SUBSCRIBE OVER). "
-                  f"나머지 종목은 20초마다 조회로 갱신하고, 상세 화면에서 보는 종목은 우선 구독해요.", flush=True)
+                  f"나머지 종목은 5초마다 조회로 갱신하고, 상세 화면에서 보는 종목은 우선 구독해요.", flush=True)
         return code
     print(f"[KIS WS] 구독 실패 {code}: [{body.get('msg_cd')}] {msg1} -> 잠시 뒤 다시 신청해요", flush=True)
     return code
@@ -104,7 +104,8 @@ def _now():
 def get_status():
     return {**_status, "ws_ready": _ws_ready.is_set(), "subscribed_codes": list(_subscribed_codes),
             "sub_cap": _sub_cap, "priority_code": _priority_code,
-            "blocked": sorted(c for c, t in _blocked_until.items() if t > time.monotonic())}
+            "blocked": sorted(c for c, t in _blocked_until.items() if t > time.monotonic()),
+            "rest_speed": _rest_session.stats()}
 
 
 _http_session = requests.Session()
@@ -226,20 +227,28 @@ class _ThrottledSession(requests.Session):
     """KIS REST 호출 속도 조절 + 한도 초과 시 재시도.
     KIS는 초당 호출 수를 넘으면 HTTP 500 + "초당 거래건수를 초과하였습니다"(EGW00201)로 응답함.
     - 모든 요청을 일정 간격으로 보냄. 화면에서 누른 요청(차트·종목 정보 등)이 백그라운드 갱신보다 먼저
-    - 한도 초과를 받으면 간격을 늘리고(최대 0.5초), 성공이 이어지면 빠르게 원래 속도로 돌아옴"""
+    - 한도 초과를 받으면 간격을 1.25배로 늘리고(최대 KIS_RPS 간격의 2배, 1초 이하), 3번 연속 성공하면 15%씩 줄임
+      -> 한도 초과가 줄면서도 몇 초 안에 원래 속도로 돌아옴
+      (첫 수정본은 최대 1초·10번 연속 성공 조건이라 시작할 때 몇 번 걸리면 1분 넘게 초당 1건으로 느려졌음)"""
 
-    MAX_INTERVAL = 0.5
+    SLOW_FACTOR = 1.25
+    RECOVER_AFTER = 3       # 이만큼 연속 성공하면
+    RECOVER_FACTOR = 0.85   # 간격을 이만큼 줄임
 
     def __init__(self, rps):
         super().__init__()
         self.trust_env = False
         self._base = 1.0 / max(1.0, rps)
         self._interval = self._base
+        self.MAX_INTERVAL = min(1.0, self._base * 2)
         self._cond = threading.Condition()
         self._next = 0.0
         self._fg_waiting = 0      # 차례를 기다리는 화면 요청 수
         self._slow_logged = False
         self._last_log = 0.0       # 속도 변경 기록은 1분에 한 번만
+        self._ok_streak = 0
+        self.limited_count = 0     # 확인용: 서버 시작 후 한도 초과 횟수
+        self.failed_count = 0      # 확인용: 재시도를 다 써도 한도 초과로 끝난 요청 수 (화면에 빈칸이 생김)
 
     def _wait_turn(self):
         fg = not getattr(_bg, "on", False)
@@ -262,8 +271,10 @@ class _ThrottledSession(requests.Session):
 
     def _on_limited(self):
         with self._cond:
-            self._interval = min(self.MAX_INTERVAL, self._interval * 2)
-            self._next = max(self._next, time.monotonic() + 0.3)
+            self.limited_count += 1
+            self._ok_streak = 0
+            self._interval = min(self.MAX_INTERVAL, self._interval * self.SLOW_FACTOR)
+            self._next = max(self._next, time.monotonic() + self._interval)
             if not self._slow_logged and time.monotonic() - self._last_log > 60:
                 self._slow_logged = True
                 self._last_log = time.monotonic()
@@ -271,9 +282,17 @@ class _ThrottledSession(requests.Session):
 
     def _on_ok(self):
         with self._cond:
-            self._interval = max(self._base, self._interval * 0.7)
+            self._ok_streak += 1
+            if self._ok_streak >= self.RECOVER_AFTER and self._interval > self._base:
+                self._ok_streak = 0
+                self._interval = max(self._base, self._interval * self.RECOVER_FACTOR)
             if self._slow_logged and self._interval <= self._base:
                 self._slow_logged = False   # 되돌린 건 따로 기록하지 않음 (기록이 너무 잦아서)
+
+    def stats(self):
+        with self._cond:
+            return {"초당_현재": round(1 / self._interval, 2), "초당_상한(KIS_RPS)": round(1 / self._base, 2),
+                    "한도초과_누적": self.limited_count, "최종실패_누적": self.failed_count}
 
     @staticmethod
     def _rate_limited(resp):
@@ -283,13 +302,16 @@ class _ThrottledSession(requests.Session):
         return "EGW00201" in t or "초당 거래건수" in t
 
     def request(self, method, url, *args, **kwargs):
-        for attempt in range(5):
+        for attempt in range(8):   # 처음 한도에 걸렸을 때 속도를 낮추는 동안 포기하지 않도록 넉넉히
             self._wait_turn()
             resp = super().request(method, url, *args, **kwargs)
             if not self._rate_limited(resp):
                 self._on_ok()
                 break
             self._on_limited()
+        else:
+            with self._cond:
+                self.failed_count += 1
         if resp.status_code >= 400 and not self._rate_limited(resp):
             # raise_for_status()는 URL만 남기므로 KIS가 보낸 실제 메시지를 함께 기록
             # (한도 초과는 위에서 따로 한 줄로 알리므로 제외)
@@ -309,7 +331,7 @@ _access_token_lock = threading.Lock()
 _access_token = {"token": None, "expires_at": 0}
 
 REST_QUOTE_CACHE = {}          # code -> {"data": {...}, "fetched_at": ts}
-REST_QUOTE_TTL = 20            # 초 (종가성 데이터라 자주 바뀌지 않고, 장애 시 반복 실패 방지에도 도움)
+REST_QUOTE_TTL = 5             # 초. 멀티종목 시세로 여러 종목을 한 번에 받으므로 짧게 (실시간 구독 못 한 종목의 갱신 주기)
 REST_TIMEOUT = 5               # 초 (KIS 장애/점검 시 요청 스레드가 오래 안 묶이도록 짧게)
 
 
@@ -382,12 +404,103 @@ def _get_access_token():
         return _access_token["token"]
 
 
+_multi_lock = threading.Lock()
+
+
+def _quote_from_multi_row(r):
+    """멀티종목 시세 한 줄 -> 앱 시세 dict. 전일대비·등락률은 단일 시세처럼 이미 부호(-) 포함 (실측 확인: 오뚜기 -2000, -0.68)"""
+    price = _num(r.get("inter2_prpr"))
+    if not price:
+        return None
+    return {
+        "code": r.get("inter_shrn_iscd"),
+        "price": price,
+        "change": _num(r.get("inter2_prdy_vrss")) or 0.0,
+        "rate": _num(r.get("prdy_ctrt")) or 0.0,
+        "open": _num(r.get("inter2_oprc")) or 0.0,
+        "high": _num(r.get("inter2_hgpr")) or 0.0,
+        "low": _num(r.get("inter2_lwpr")) or 0.0,
+        "volume": _num(r.get("acml_vol")) or 0.0,
+        "amount": _num(r.get("acml_tr_pbmn")) or 0.0,
+        "sign": r.get("prdy_vrss_sign", "3"),
+        "ts": None,
+        "live": False,
+    }
+
+
+def get_rest_quotes(codes):
+    """여러 종목 REST 시세를 한 번에 -> {code: 시세 dict}. 멀티종목 시세(FHKST11300006, 30종목씩)로 받고,
+    거기서 빠진 종목이나 멀티 조회가 실패했을 때만 종목별 조회(get_rest_quote)로 대신함"""
+    out, need = {}, []
+    now = time.time()
+    for c in codes:
+        frozen = closed_cache_get("quotes", c)
+        cached = REST_QUOTE_CACHE.get(c)
+        if frozen:
+            out[c] = frozen
+        elif cached and now - cached["fetched_at"] < REST_QUOTE_TTL:
+            if cached["data"]:
+                out[c] = cached["data"]
+        else:
+            need.append(c)
+    if not need:
+        return out
+    with _multi_lock:   # 동시에 온 요청이 같은 종목을 또 조회하지 않게
+        now = time.time()
+        todo = [c for c in need if not (REST_QUOTE_CACHE.get(c) and now - REST_QUOTE_CACHE[c]["fetched_at"] < REST_QUOTE_TTL)]
+        got = {}
+        for i in range(0, len(todo), 30):
+            chunk = todo[i:i + 30]
+            try:
+                status, body = _fetch_multi_price_raw(chunk)
+                if status != 200 or body.get("rt_cd") != "0":
+                    print(f"[KIS REST] 멀티종목 시세 실패: HTTP {status} [{body.get('msg_cd')}] {body.get('msg1')} -> 종목별 조회로 대신해요", flush=True)
+                    continue
+                for r in body.get("output") or []:
+                    q = _quote_from_multi_row(r)
+                    if q and q["code"] in chunk:
+                        got[q["code"]] = q
+            except Exception as e:
+                print(f"[KIS REST] 멀티종목 시세 실패: {type(e).__name__}: {e} -> 종목별 조회로 대신해요", flush=True)
+        t = time.time()
+        for c, q in got.items():
+            REST_QUOTE_CACHE[c] = {"data": q, "fetched_at": t}
+        if got:
+            closed_cache_put_many("quotes", got)
+    for c in need:
+        q = got.get(c) or (REST_QUOTE_CACHE.get(c) or {}).get("data")
+        if not q:
+            q = get_rest_quote(c)   # 멀티 응답에 없던 종목만
+        if q:
+            out[c] = q
+    return out
+
+
 def get_rest_quote(code):
     """웹소켓 실시간 틱이 없을 때(장마감 등) 쓰는 REST 시세 조회 - 종가/마지막 체결가를 반환"""
+    frozen = closed_cache_get("quotes", code)   # 장 마감 후에는 파일에 저장해 둔 종가
+    if frozen:
+        return frozen
     now = time.time()
     cached = REST_QUOTE_CACHE.get(code)
     if cached and now - cached["fetched_at"] < REST_QUOTE_TTL:
         return cached["data"]
+    # 같은 종목을 다른 요청이 조회 중이면 끝날 때까지 기다렸다가 그 결과를 씀 (중복 호출 방지)
+    with _rest_quote_locks_guard:
+        lock = _rest_quote_locks.setdefault(code, threading.Lock())
+    with lock:
+        cached = REST_QUOTE_CACHE.get(code)
+        if cached and time.time() - cached["fetched_at"] < REST_QUOTE_TTL:
+            return cached["data"]
+        return _fetch_rest_quote(code)
+
+
+_rest_quote_locks = {}
+_rest_quote_locks_guard = threading.Lock()
+
+
+def _fetch_rest_quote(code):
+    now = time.time()
 
     try:
         token = _get_access_token()
@@ -428,6 +541,8 @@ def get_rest_quote(code):
             "live": False,   # 실시간 체결이 아니라 REST 조회(종가 등)임을 표시
         }
         REST_QUOTE_CACHE[code] = {"data": result, "fetched_at": now}
+        if result["price"]:
+            closed_cache_put("quotes", code, result)
         return result
     except Exception as e:
         print(f"[KIS REST] 시세 조회 실패 ({code}): {type(e).__name__}: {e}", flush=True)
@@ -698,6 +813,9 @@ def _fetch_price_raw(code, market):
 
 def get_nxt_quote(code):
     """NXT 현재가 -> {"available": True, "price", "volume", "high", "low"} 또는 {"available": False, "msg"}"""
+    frozen = closed_cache_get("nxt", code)
+    if frozen:
+        return frozen
     now = time.time()
     cached = NXT_CACHE.get(code)
     if cached and now - cached["fetched_at"] < NXT_TTL:
@@ -711,6 +829,8 @@ def get_nxt_quote(code):
         data = {"available": True, "price": price, "volume": _num(out.get("acml_vol")),
                 "high": _num(out.get("stck_hgpr")), "low": _num(out.get("stck_lwpr"))}
     NXT_CACHE[code] = {"data": data, "fetched_at": now}
+    if status == 200 and body.get("rt_cd") == "0":   # NXT 미거래 종목(available False)도 저장, 일시 오류는 저장 안 함
+        closed_cache_put("nxt", code, data)
     return data
 
 
@@ -774,6 +894,15 @@ def _kis_get(tr_id, path, params):
     return resp.status_code, resp.json()
 
 
+def _fetch_multi_price_raw(codes, market="J"):
+    """관심종목(멀티종목) 시세조회(FHKST11300006): 종목코드 최대 30개를 한 번에 -> (HTTP 상태, 응답)"""
+    params = {}
+    for i, c in enumerate(codes[:30], 1):
+        params[f"FID_COND_MRKT_DIV_CODE_{i}"] = market
+        params[f"FID_INPUT_ISCD_{i}"] = c
+    return _kis_get("FHKST11300006", "/uapi/domestic-stock/v1/quotations/intstock-multprice", params)
+
+
 def _fetch_kr_index_raw(code):
     """국내업종 현재지수(FHPUP02100000)"""
     return _kis_get("FHPUP02100000", "/uapi/domestic-stock/v1/quotations/inquire-index-price",
@@ -817,6 +946,9 @@ def _kr_closes(code):
 
 def get_kr_indices():
     """[{key, name, price, change, rate, closes}]"""
+    frozen = closed_cache_get("kr_indices")
+    if frozen:
+        return frozen
     now = time.time()
     if KR_INDEX_CACHE["data"] and now - KR_INDEX_CACHE["fetched_at"] < KR_INDEX_TTL:
         return KR_INDEX_CACHE["data"]
@@ -849,6 +981,8 @@ def get_kr_indices():
         time.sleep(0.06)
     if any(i["price"] for i in result):
         KR_INDEX_CACHE.update(data=result, fetched_at=now)
+        if all(i["price"] and i["closes"] for i in result):
+            closed_cache_put("kr_indices", None, result)
     return result
 
 
@@ -917,17 +1051,31 @@ QQQ_CACHE = {"data": None, "fetched_at": 0.0}
 QQQ_TTL = 30
 
 
-def _qqq_session():
-    """한국 시간 기준으로 어느 시장 가격을 볼지. (주간거래 BAQ / 나스닥 NAS)
-    미국 서머타임은 고려하지 않은 대략적인 구분 (겨울 기준)"""
-    now = datetime.now(KST)
-    m = now.hour * 60 + now.minute
-    weekday = now.weekday() < 5
-    if weekday and 9 * 60 <= m < 18 * 60:
+def _us_eastern_now(now_utc=None):
+    """미국 동부 시간(뉴욕). 서머타임: 3월 둘째 일요일 02:00 ~ 11월 첫째 일요일 02:00 (현지 시각).
+    zoneinfo는 윈도우에서 tzdata 패키지가 없으면 동작하지 않아(exe 포함) 규칙을 직접 계산"""
+    from datetime import date
+    utc = now_utc or datetime.now(timezone.utc)
+    y = utc.year
+    mar8, nov1 = date(y, 3, 8), date(y, 11, 1)
+    dst_start = datetime(y, 3, 8 + (6 - mar8.weekday()) % 7, 7, tzinfo=timezone.utc)   # 02:00 EST = 07:00 UTC
+    dst_end = datetime(y, 11, 1 + (6 - nov1.weekday()) % 7, 6, tzinfo=timezone.utc)    # 02:00 EDT = 06:00 UTC
+    offset = -4 if dst_start <= utc < dst_end else -5
+    return utc.astimezone(timezone(timedelta(hours=offset)))
+
+
+def _qqq_session(now_utc=None):
+    """어느 시장 가격을 볼지 (주간거래 BAQ / 나스닥 NAS). 미국 동부 시간 기준이라 서머타임이 자동 반영됨.
+    주간거래 20:00~04:00 / 프리마켓 04:00~09:30 / 정규장 09:30~16:00 / 16:00~20:00은 마감 (미국 휴장일은 미반영)
+    한국 시간으로는 겨울 주간거래 10:00~18:00, 여름 09:00~17:00"""
+    et = _us_eastern_now(now_utc)
+    m = et.hour * 60 + et.minute
+    wd = et.weekday()                     # 0=월 ... 6=일 (미국 날짜 기준)
+    if (wd in (6, 0, 1, 2, 3) and m >= 20 * 60) or (wd in (0, 1, 2, 3, 4) and m < 4 * 60):
         return "BAQ", "주간거래"
-    if weekday and 18 * 60 <= m < 23 * 60 + 30:
+    if wd < 5 and 4 * 60 <= m < 9 * 60 + 30:
         return "NAS", "프리마켓"
-    if (weekday and m >= 23 * 60 + 30) or (now.weekday() in (1, 2, 3, 4, 5) and m < 6 * 60):
+    if wd < 5 and 9 * 60 + 30 <= m < 16 * 60:
         return "NAS", "정규장"
     return "NAS", "마감"
 
@@ -1304,3 +1452,136 @@ def start_background():
     print(f"[KIS WS] APP_KEY 확인됨 ({APP_KEY[:4]}...), 백그라운드 스레드 생성", flush=True)
     t = threading.Thread(target=_run_forever, daemon=True)
     t.start()
+
+
+# ---------- 파일 캐시 (서버를 다시 켜도 KIS를 다시 부르지 않도록) ----------
+def _load_json(path, default):
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return default
+
+
+def _save_json(path, data):
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False)
+        os.replace(tmp, path)
+    except OSError as e:
+        print(f"[캐시] 저장 실패 ({os.path.basename(path)}): {e}", flush=True)
+
+
+# 장 마감 후 캐시: 평일 20:10(KRX·NXT 애프터마켓 종료 후) ~ 다음 평일 08:00(NXT 프리마켓 시작)에는
+# 국내 시세·지수가 바뀌지 않으므로 한 번 받은 값을 파일에 두고 계속 씀. 08:00이 되면 자동으로 다시 조회.
+# (평일 공휴일은 모르므로 그날 낮에는 평소처럼 조회함)
+CLOSED_FROM = 20 * 60 + 10
+CLOSED_UNTIL = 8 * 60
+_CLOSED_FILE = app_path("closed_cache.json")
+_closed_lock = threading.Lock()
+_closed = _load_json(_CLOSED_FILE, {})
+
+
+def closed_period(now=None):
+    """장 마감 구간이면 그 구간이 시작된 평일 날짜(YYYYMMDD), 아니면 None"""
+    now = now or datetime.now(KST)
+    m = now.hour * 60 + now.minute
+    wd = now.weekday()
+    if wd < 5 and CLOSED_UNTIL <= m < CLOSED_FROM:
+        return None
+    if wd < 5 and m >= CLOSED_FROM:
+        start = now.date()
+    else:
+        start = now.date() - timedelta(days=1)
+        while start.weekday() >= 5:
+            start -= timedelta(days=1)
+    return start.strftime("%Y%m%d")
+
+
+def closed_cache_get(kind, key=None):
+    p = closed_period()
+    if not p:
+        return None
+    with _closed_lock:
+        if _closed.get("period") != p:
+            return None
+        box = _closed.get(kind)
+        return box if key is None else (box or {}).get(key)
+
+
+def closed_cache_put_many(kind, mapping):
+    """여러 값을 한 번에 저장 (파일 쓰기 1번)"""
+    p = closed_period()
+    if not p or not mapping:
+        return
+    with _closed_lock:
+        if _closed.get("period") != p:
+            _closed.clear()
+            _closed["period"] = p
+        _closed.setdefault(kind, {}).update(mapping)
+        _save_json(_CLOSED_FILE, _closed)
+
+
+def closed_cache_put(kind, key, value):
+    p = closed_period()
+    if not p or value is None:
+        return
+    with _closed_lock:
+        if _closed.get("period") != p:     # 새 구간: 이전 구간 값은 버림
+            _closed.clear()
+            _closed["period"] = p
+        if key is None:
+            _closed[kind] = value
+        else:
+            _closed.setdefault(kind, {})[key] = value
+        _save_json(_CLOSED_FILE, _closed)
+
+
+# 스파크라인 캐시: 최근 1개월 중 어제까지의 종가. 날짜가 바뀌면 다시 받음 (종목당 하루 1번)
+# 오늘 값은 화면이 받은 현재가로 붙임
+SPARK_DAYS = 31
+_SPARK_FILE = app_path("spark_cache.json")
+_spark_lock = threading.Lock()
+_spark = _load_json(_SPARK_FILE, {})
+_spark_code_locks = {}
+
+
+def get_sparks(codes):
+    """{code: [{time, close}, ...] 또는 None(조회 실패)}"""
+    today = today_kst()
+    out, missing = {}, []
+    with _spark_lock:
+        if _spark.get("date") != today:
+            _spark.clear()
+            _spark.update(date=today, data={})
+        for c in codes:
+            if c in _spark["data"]:
+                out[c] = _spark["data"][c]
+            else:
+                missing.append(c)
+    start = (datetime.now(KST) - timedelta(days=SPARK_DAYS)).strftime("%Y%m%d")
+    fetched = {}
+    for c in missing:
+        with _spark_lock:
+            code_lock = _spark_code_locks.setdefault(c, threading.Lock())
+        with code_lock:   # 같은 종목을 다른 요청이 받는 중이면 기다렸다가 그 결과를 씀
+            with _spark_lock:
+                if _spark.get("date") == today and c in _spark["data"]:
+                    out[c] = _spark["data"][c]
+                    continue
+            try:
+                h = get_history(c, start, today, "D", "0")
+                fetched[c] = out[c] = [{"time": b["time"], "close": b["close"]}
+                                       for b in h["bars"] if b["time"].replace("-", "") < today]
+                with _spark_lock:
+                    if _spark.get("date") == today:
+                        _spark["data"][c] = fetched[c]
+            except Exception as e:
+                print(f"[KIS REST] 스파크라인 조회 실패 ({c}): {type(e).__name__}: {e}", flush=True)
+                out[c] = None
+    if fetched:
+        with _spark_lock:
+            if _spark.get("date") == today:
+                _save_json(_SPARK_FILE, _spark)
+    return out
